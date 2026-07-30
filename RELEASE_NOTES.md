@@ -1,18 +1,16 @@
-# Blender Render Watchdog 2.0
+# Blender Render Watchdog 2.1
 
-Version 2.0 implements the complete public upgrade roadmap from issues #1, #2 and #3.
+Version 2.1 is a complete visual refresh of the 2.0 feature set.
 
 Highlights:
 
-- redesigned interface with Advanced, Network, Insights and Sandbox workflows;
-- persistent smart queue with estimates, retries and shortest-first ordering;
-- robust video composition to MP4, WebM, MKV or AVI;
-- render time and memory prediction, hardest-frame analytics and history;
-- Auto Fix preflight for common render problems;
-- distributed rendering across up to five LAN computers with dynamic load balancing;
-- hot-plug workers and hardware detection;
-- phone-friendly local dashboard with progress, preview and render controls;
-- Render Sandbox comparison mode;
-- automatic update support, tests and documented source builds.
+- rounded matte-glass cards with layered borders, soft shadows and light sweeps;
+- pill navigation with eased horizontal page transitions;
+- animated toggles, hover/focus feedback and click ripples;
+- rounded entry fields, buttons and progress with an active shimmer;
+- rebalanced layouts for the new controls;
+- matching glass redesign for the phone dashboard;
+- reduced-motion support in the browser dashboard;
+- reusable UI primitives and expanded automated tests.
 
-The network and mobile features operate on the local network and use private random access tokens. FFmpeg is required only when video composition is enabled.
+Rendering, queue, recovery, network, mobile control, Auto Fix, analytics, video and Sandbox behaviour remain compatible with 2.0. Existing settings and history are preserved during the update.

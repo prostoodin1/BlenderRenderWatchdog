@@ -2,10 +2,15 @@ import json
 import unittest
 import urllib.request
 
-from mobile_dashboard import MobileDashboardServer
+from mobile_dashboard import DASHBOARD_HTML, MobileDashboardServer
 
 
 class MobileDashboardTests(unittest.TestCase):
+    def test_dashboard_uses_the_21_glass_theme(self) -> None:
+        self.assertIn("BLENDER RENDER WATCHDOG 2.1", DASHBOARD_HTML)
+        self.assertIn("border-radius:28px", DASHBOARD_HTML)
+        self.assertIn("prefers-reduced-motion:reduce", DASHBOARD_HTML)
+
     def test_state_and_action_endpoints_require_token(self) -> None:
         actions = []
         server = MobileDashboardServer(
