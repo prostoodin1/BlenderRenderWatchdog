@@ -103,6 +103,7 @@ class GlassButton(tk.Canvas):
         self.hover_mix = 0.0
         self.focused = False
         self.pressed = False
+        self.ripple: tuple[float, float, float] | None = None
         self._animation_serial = 0
         self._explicit_width = width
         self._height = 46 if "Primary" in style else 40
@@ -169,6 +170,18 @@ class GlassButton(tk.Canvas):
         rounded_rectangle(self, 3, 5, width - 3, height - 1, radius, fill=self.palette["shadow"], outline="")
         rounded_rectangle(self, 2, 2 + shift, width - 2, height - 4 + shift, radius, fill=border, outline="")
         rounded_rectangle(self, 3, 3 + shift, width - 3, height - 5 + shift, max(1, radius - 1), fill=fill, outline="")
+        if self.ripple is not None:
+            ripple_x, ripple_y, progress = self.ripple
+            ripple_radius = max(width, height) * 0.8 * progress
+            ripple_colour = blend_hex(fill, glow, max(0.0, 0.7 - progress * 0.55))
+            self.create_oval(
+                ripple_x - ripple_radius,
+                ripple_y - ripple_radius,
+                ripple_x + ripple_radius,
+                ripple_y + ripple_radius,
+                outline=ripple_colour,
+                width=2,
+            )
         self.create_line(
             radius + 3,
             4 + shift,
@@ -220,7 +233,26 @@ class GlassButton(tk.Canvas):
         self.pressed = False
         self._draw()
         if was_pressed and event is not None and 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
+            self._start_ripple(event.x, event.y)
             self.invoke()
+
+    def _start_ripple(self, x: float, y: float) -> None:
+        frame = 0
+
+        def step() -> None:
+            nonlocal frame
+            if not self.winfo_exists():
+                return
+            frame += 1
+            self.ripple = (x, y, min(1.0, frame / 14))
+            self._draw()
+            if frame < 14:
+                self.after(16, step)
+            else:
+                self.ripple = None
+                self._draw()
+
+        step()
 
     def _focus_in(self, _event=None) -> None:
         self.focused = True
@@ -604,7 +636,9 @@ class GlassCard(tk.Canvas):
         self.radius = radius
         self.inset = 11
         self.glow = 0.0
+        self.glint = -1.0
         self._pulse_serial = 0
+        self._glow_serial = 0
         super().__init__(
             parent,
             height=100,
@@ -620,6 +654,7 @@ class GlassCard(tk.Canvas):
         self.bind("<Configure>", self._resize)
         self.content.bind("<Configure>", self._content_resized, add="+")
         self.after_idle(self._content_resized)
+        self.after(80, self.enable_hover)
 
     def _content_resized(self, _event=None) -> None:
         requested = max(70, self.content.winfo_reqheight() + self.inset * 2)
@@ -651,7 +686,85 @@ class GlassCard(tk.Canvas):
             width=1,
             tags="glass",
         )
+        if 0.0 <= self.glint <= 1.0:
+            usable_width = max(1, width - self.radius * 2)
+            center = self.radius + usable_width * self.glint
+            for offset, colour, line_width in (
+                (0, self.palette["accent_blue"], 2),
+                (18, blend_hex(self.palette["panel"], self.palette["accent_blue"], 0.45), 1),
+                (-18, blend_hex(self.palette["panel"], self.palette["accent"], 0.5), 1),
+            ):
+                self.create_line(
+                    center + offset - 18,
+                    4,
+                    center + offset + 18,
+                    4,
+                    fill=colour,
+                    width=line_width,
+                    tags="glass",
+                )
         self.tag_lower("glass")
+
+    def enable_hover(self) -> None:
+        def descendants(widget):
+            yield widget
+            for child in widget.winfo_children():
+                yield from descendants(child)
+
+        for widget in descendants(self.content):
+            widget.bind("<Enter>", lambda _event: self.animate_glow(0.34), add="+")
+            widget.bind("<Leave>", lambda _event: self.after(35, self._settle_hover), add="+")
+
+    def _settle_hover(self) -> None:
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        left = self.winfo_rootx()
+        top = self.winfo_rooty()
+        inside = left <= pointer_x <= left + self.winfo_width() and top <= pointer_y <= top + self.winfo_height()
+        self.animate_glow(0.34 if inside else 0.0)
+
+    def animate_glow(self, target: float) -> None:
+        self._glow_serial += 1
+        serial = self._glow_serial
+
+        def step() -> None:
+            if serial != self._glow_serial or not self.winfo_exists():
+                return
+            distance = target - self.glow
+            if abs(distance) < 0.02:
+                self.glow = target
+                self._draw()
+                return
+            self.glow += distance * 0.26
+            self._draw()
+            self.after(16, step)
+
+        step()
+
+    def reveal(self, delay: int = 0) -> None:
+        self._pulse_serial += 1
+        serial = self._pulse_serial
+
+        def begin() -> None:
+            frame = 0
+
+            def step() -> None:
+                nonlocal frame
+                if serial != self._pulse_serial or not self.winfo_exists():
+                    return
+                frame += 1
+                progress = frame / 26
+                self.glint = -0.15 + progress * 1.3
+                self.glow = max(self.glow, (1 - abs(progress * 2 - 1)) * 0.55)
+                self._draw()
+                if frame < 26:
+                    self.after(16, step)
+                else:
+                    self.glint = -1.0
+                    self.animate_glow(0.0)
+
+            step()
+
+        self.after(max(0, delay), begin)
 
     def pulse(self) -> None:
         self._pulse_serial += 1

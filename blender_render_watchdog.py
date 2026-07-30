@@ -1285,6 +1285,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.current_analysis_output: Path | None = None
             self.hardware_poll_running = False
             self.mobile_state_cache: dict[str, object] = {}
+            self.glass_cards: list[GlassCard] = []
+            self.card_reveal_index = 0
+            self.progress_animation_id: str | None = None
+            self.progress_animation_target = 0.0
 
             saved_blender = args.blender or self.config.get("blender") or ""
             if not saved_blender:
@@ -1471,9 +1475,11 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Button(chip_row, text="History + Auto Fix", style="Chip.TButton").grid(row=0, column=3, sticky="w", padx=(8, 0))
 
             status_card = self.make_card(top, ttk_module, row=0, column=1, rowspan=3, padx=(18, 0))
+            self.status_card = status_card._glass_shell
             ttk_module.Label(status_card, text="CURRENT STATE", style="Mini.TLabel").pack(anchor="w")
             ttk_module.Label(status_card, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 0))
             ttk_module.Label(status_card, textvariable=self.status_detail_var, style="StatusDetail.TLabel").pack(anchor="w", pady=(6, 0))
+            self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
 
             self.notebook = GlassTabView(outer, palette=c)
             self.notebook.grid(row=1, column=0, sticky="nsew")
@@ -1875,7 +1881,6 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Label(render_card, text="%", style="CardHint.TLabel").grid(row=2, column=2, sticky="w", padx=(6, 0), pady=(10, 0))
             ttk_module.Label(render_card, text="Crash retries", style="Field.TLabel").grid(row=2, column=4, sticky="e", padx=(12, 6), pady=(10, 0))
             ttk_module.Entry(render_card, textvariable=self.max_restarts_var, width=7).grid(row=2, column=5, sticky="w", pady=(10, 0))
-            ttk_module.Label(render_card, text="Then continue queue", style="CardHint.TLabel").grid(row=2, column=6, sticky="w", padx=(8, 0), pady=(10, 0))
 
             ttk_module.Label(render_card, text="Output mode", style="Field.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
             mode_combo = ttk_module.Combobox(render_card, textvariable=self.render_mode_var, values=("frames", "video"), state="readonly", width=12)
@@ -2045,6 +2050,9 @@ def run_gui(args: argparse.Namespace) -> int:
         def make_card(self, parent, ttk_module, row: int, column: int, sticky: str = "nsew", padx=0, pady=0, rowspan: int = 1):
             card = GlassCard(parent, palette=self.colors, padding=18, radius=24, backdrop=self.colors["bg"])
             card.grid(row=row, column=column, rowspan=rowspan, sticky=sticky, padx=padx, pady=pady)
+            self.glass_cards.append(card)
+            card.reveal(self.card_reveal_index * 38)
+            self.card_reveal_index += 1
             return card.content
 
         def add_path_row(self, parent, ttk_module, row: int, label: str, variable: tk.StringVar, command) -> tuple[object, object, object]:
@@ -2108,29 +2116,42 @@ def run_gui(args: argparse.Namespace) -> int:
 
             def step(value: int = 0) -> None:
                 try:
-                    self.root.attributes("-alpha", min(1.0, value / 10.0))
+                    progress = min(1.0, value / 18.0)
+                    eased = 1 - (1 - progress) ** 3
+                    self.root.attributes("-alpha", eased)
                 except tk.TclError:
                     return
-                if value < 10:
-                    self.root.after(24, lambda: step(value + 1))
+                if value < 18:
+                    self.root.after(16, lambda: step(value + 1))
 
             step()
 
         def animate_tab_change(self, _event=None) -> None:
-            try:
-                self.root.attributes("-alpha", 0.96)
-                self.root.after(45, lambda: self.root.attributes("-alpha", 1.0))
-            except tk.TclError:
-                pass
+            def reveal_visible_cards() -> None:
+                delay = 0
+                for card in self.glass_cards:
+                    if card.winfo_ismapped():
+                        card.reveal(delay)
+                        delay += 34
+
+            self.root.after(20, reveal_visible_cards)
 
         def animate_progress(self, target: float) -> None:
-            target = max(0.0, min(100.0, target))
-            current = float(self.progress_var.get())
-            if abs(target - current) < 0.5:
-                self.progress_var.set(target)
+            self.progress_animation_target = max(0.0, min(100.0, target))
+            if self.progress_animation_id is not None:
                 return
-            self.progress_var.set(current + (target - current) * 0.35)
-            self.root.after(35, lambda: self.animate_progress(target))
+
+            def step() -> None:
+                current = float(self.progress_var.get())
+                distance = self.progress_animation_target - current
+                if abs(distance) < 0.35:
+                    self.progress_var.set(self.progress_animation_target)
+                    self.progress_animation_id = None
+                    return
+                self.progress_var.set(current + distance * 0.24)
+                self.progress_animation_id = self.root.after(16, step)
+
+            step()
 
         def update_manual_controls(self) -> None:
             show_frames = not self.use_scene_output_var.get()
