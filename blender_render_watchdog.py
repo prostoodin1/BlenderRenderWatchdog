@@ -25,6 +25,7 @@ from pathlib import Path
 
 from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
+from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from mobile_dashboard import MobileDashboardServer
 from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator, prepare_network_project
 from render_analytics import RenderHistory, RenderSession, estimate_render
@@ -1265,6 +1266,10 @@ def run_gui(args: argparse.Namespace) -> int:
             }
 
             self.config = load_config()
+            self.language_code = normalize_language(self.config.get("language"))
+            self.localizable_widgets: list[object] = []
+            self.localizable_headings: list[tuple[object, str, str]] = []
+            self.localized_variables: dict[str, tuple[tk.StringVar, str, dict[str, object]]] = {}
             self.log_queue: queue.Queue[str | tuple[str, float, str]] = queue.Queue()
             self.stop_event: threading.Event | None = None
             self.pause_event: threading.Event | None = None
@@ -1309,8 +1314,11 @@ def run_gui(args: argparse.Namespace) -> int:
             default_scene_range = "1" if not self.start_frame_var.get().strip() and not self.end_frame_var.get().strip() else "0"
             self.use_scene_range_var = tk.BooleanVar(value=(self.config.get("use_scene_range", default_scene_range) == "1"))
             self.use_scene_output_var = tk.BooleanVar(value=(self.config.get("use_scene_output", "0") == "1"))
-            self.status_var = tk.StringVar(value="Ready")
-            self.status_detail_var = tk.StringVar(value="Waiting for render setup")
+            self.language_var = tk.StringVar(value=LANGUAGE_LABELS[self.language_code])
+            self.status_var = tk.StringVar()
+            self.status_detail_var = tk.StringVar()
+            self.set_localized(self.status_var, "Ready")
+            self.set_localized(self.status_detail_var, "Waiting for render setup")
             self.progress_var = tk.DoubleVar(value=0.0)
             self.progress_text_var = tk.StringVar(value="0%")
             self.use_cpu_var = tk.BooleanVar(value=(self.config.get("use_cpu", "1") != "0"))
@@ -1336,21 +1344,28 @@ def run_gui(args: argparse.Namespace) -> int:
             self.auto_install_updates_var = tk.BooleanVar(value=(self.config.get("auto_install_updates", "0") == "1"))
             self.shutdown_after_render_var = tk.BooleanVar(value=(self.config.get("shutdown_after_render", "0") == "1"))
             self.mobile_enabled_var = tk.BooleanVar(value=(self.config.get("mobile_enabled", "0") == "1"))
-            self.mobile_url_var = tk.StringVar(value="Mobile dashboard is stopped")
-            self.prediction_var = tk.StringVar(value="Select a project and run Analyze")
-            self.memory_prediction_var = tk.StringVar(value="Memory: —")
-            self.autofix_var = tk.StringVar(value="Preflight has not been run")
+            self.mobile_url_var = tk.StringVar()
+            self.prediction_var = tk.StringVar()
+            self.memory_prediction_var = tk.StringVar()
+            self.autofix_var = tk.StringVar()
+            self.set_localized(self.mobile_url_var, "Mobile dashboard is stopped")
+            self.set_localized(self.prediction_var, "Select a project and run Analyze")
+            self.set_localized(self.memory_prediction_var, "Memory: —")
+            self.set_localized(self.autofix_var, "Preflight has not been run")
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value="")
-            self.network_status_var = tk.StringVar(value="Controller is stopped")
-            self.worker_name_var = tk.StringVar(value=platform.node() or "Render worker")
+            self.network_status_var = tk.StringVar()
+            self.worker_name_var = tk.StringVar(value=platform.node() or self.tr("Render worker"))
+            self.set_localized(self.network_status_var, "Controller is stopped")
             self.worker_range_start_var = tk.StringVar(value="")
             self.worker_range_end_var = tk.StringVar(value="")
             self.sandbox_frame_var = tk.StringVar(value="1")
             self.sandbox_parallel_var = tk.BooleanVar(value=False)
-            self.sandbox_status_var = tk.StringVar(value="Ready to compare Draft, Balanced and Quality")
+            self.sandbox_status_var = tk.StringVar()
+            self.set_localized(self.sandbox_status_var, "Ready to compare Draft, Balanced and Quality")
             self.config_save_after_id: str | None = None
-            self.update_status_var = tk.StringVar(value=f"Current version: {APP_VERSION}")
+            self.update_status_var = tk.StringVar()
+            self.set_localized(self.update_status_var, "Current version: {version}", version=APP_VERSION)
             self.latest_update_manifest: dict[str, object] | None = None
 
             self.build_style(ttk)
@@ -1372,6 +1387,67 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.root.after(800, self.check_for_updates)
             if self.mobile_enabled_var.get():
                 self.root.after(1200, self.start_mobile_dashboard)
+
+        def tr(self, source: str, **values: object) -> str:
+            return translate(source, self.language_code, **values)
+
+        def register_localizable_widget(self, widget) -> None:
+            self.localizable_widgets.append(widget)
+
+        def register_heading(self, tree, column: str, source: str) -> None:
+            self.localizable_headings.append((tree, column, source))
+            tree.heading(column, text=self.tr(source))
+
+        def set_localized(self, variable: tk.StringVar, source: str, **values: object) -> None:
+            self.localized_variables[str(variable)] = (variable, source, dict(values))
+            variable.set(self.tr(source, **values))
+
+        def set_raw(self, variable: tk.StringVar, value: str) -> None:
+            self.localized_variables.pop(str(variable), None)
+            variable.set(value)
+
+        def set_widget_text(self, widget, source: str, **values: object) -> None:
+            widget._i18n_source = source
+            widget._i18n_values = dict(values)
+            if widget not in self.localizable_widgets:
+                self.localizable_widgets.append(widget)
+            widget.configure(text=self.tr(source, **values))
+
+        def change_language(self, _event=None) -> None:
+            selected = language_code_from_label(self.language_var.get())
+            if selected == self.language_code:
+                return
+            self.language_code = selected
+            self.language_var.set(LANGUAGE_LABELS[selected])
+
+            alive_widgets: list[object] = []
+            for widget in self.localizable_widgets:
+                try:
+                    if not widget.winfo_exists():
+                        continue
+                    source = getattr(widget, "_i18n_source", "")
+                    values = getattr(widget, "_i18n_values", {})
+                    widget.configure(text=self.tr(source, **values))
+                    alive_widgets.append(widget)
+                except (tk.TclError, AttributeError):
+                    continue
+            self.localizable_widgets = alive_widgets
+
+            alive_headings: list[tuple[object, str, str]] = []
+            for tree, column, source in self.localizable_headings:
+                try:
+                    if not tree.winfo_exists():
+                        continue
+                    tree.heading(column, text=self.tr(source))
+                    alive_headings.append((tree, column, source))
+                except tk.TclError:
+                    continue
+            self.localizable_headings = alive_headings
+
+            for variable, source, values in self.localized_variables.values():
+                variable.set(self.tr(source, **values))
+
+            self.save_current_config()
 
         def build_style(self, ttk_module) -> None:
             style = ttk_module.Style()
@@ -1450,7 +1526,12 @@ def run_gui(args: argparse.Namespace) -> int:
             )
         def build_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
             c = self.colors
-            ttk_module = GlassWidgetFactory(ttk_module, c)
+            ttk_module = GlassWidgetFactory(
+                ttk_module,
+                c,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+            )
             outer = ttk_module.Frame(self.root, style="App.TFrame", padding=22)
             outer.pack(fill="both", expand=True)
             outer.columnconfigure(0, weight=1)
@@ -1481,7 +1562,12 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Label(status_card, textvariable=self.status_detail_var, style="StatusDetail.TLabel").pack(anchor="w", pady=(6, 0))
             self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
 
-            self.notebook = GlassTabView(outer, palette=c)
+            self.notebook = GlassTabView(
+                outer,
+                palette=c,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+            )
             self.notebook.grid(row=1, column=0, sticky="nsew")
 
             render_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
@@ -1677,7 +1763,7 @@ def run_gui(args: argparse.Namespace) -> int:
             }
             widths = {"order": 40, "project": 220, "range": 105, "mode": 80, "estimate": 90, "output": 280, "status": 95}
             for column in columns:
-                self.queue_tree.heading(column, text=headings[column])
+                self.register_heading(self.queue_tree, column, headings[column])
                 self.queue_tree.column(
                     column,
                     width=widths[column],
@@ -1693,7 +1779,8 @@ def run_gui(args: argparse.Namespace) -> int:
             footer = ttk_module.Frame(queue_card, style="Surface.TFrame")
             footer.grid(row=2, column=0, sticky="ew", pady=(14, 0))
             footer.columnconfigure(0, weight=1)
-            self.queue_summary_var = tk.StringVar(value="Queue is empty")
+            self.queue_summary_var = tk.StringVar()
+            self.set_localized(self.queue_summary_var, "Queue is empty")
             ttk_module.Label(footer, textvariable=self.queue_summary_var, style="CardHint.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Checkbutton(
                 footer,
@@ -1752,7 +1839,7 @@ def run_gui(args: argparse.Namespace) -> int:
             headings = {"name": "Device", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "range": "Allocation"}
             widths = {"name": 130, "hardware": 240, "current": 60, "done": 60, "average": 75, "range": 100}
             for column in columns:
-                self.network_tree.heading(column, text=headings[column])
+                self.register_heading(self.network_tree, column, headings[column])
                 self.network_tree.column(column, width=widths[column], anchor="center" if column in {"current", "done", "average", "range"} else "w")
             self.network_tree.grid(row=1, column=0, sticky="nsew")
             allocation = ttk_module.Frame(nodes_card, style="Surface.TFrame")
@@ -1793,7 +1880,7 @@ def run_gui(args: argparse.Namespace) -> int:
             columns = ("project", "status", "duration", "frames", "output")
             self.history_tree = ttk_module.Treeview(history_card, columns=columns, show="headings", style="Queue.Treeview")
             for column, title, width in (("project", "Project", 170), ("status", "Status", 80), ("duration", "Time", 80), ("frames", "Frames", 60), ("output", "Output", 230)):
-                self.history_tree.heading(column, text=title)
+                self.register_heading(self.history_tree, column, title)
                 self.history_tree.column(column, width=width, anchor="w")
             self.history_tree.grid(row=1, column=0, sticky="nsew")
 
@@ -1802,8 +1889,8 @@ def run_gui(args: argparse.Namespace) -> int:
             hard_card.rowconfigure(1, weight=1)
             ttk_module.Label(hard_card, text="Hardest frames", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
             self.hardest_tree = ttk_module.Treeview(hard_card, columns=("frame", "duration"), show="headings", style="Queue.Treeview")
-            self.hardest_tree.heading("frame", text="Frame")
-            self.hardest_tree.heading("duration", text="Render time")
+            self.register_heading(self.hardest_tree, "frame", "Frame")
+            self.register_heading(self.hardest_tree, "duration", "Render time")
             self.hardest_tree.column("frame", width=100, anchor="center")
             self.hardest_tree.column("duration", width=160, anchor="center")
             self.hardest_tree.grid(row=1, column=0, sticky="nsew")
@@ -1833,7 +1920,7 @@ def run_gui(args: argparse.Namespace) -> int:
             headings = {"variant": "Variant", "samples": "Samples", "resolution": "Resolution", "time": "Time", "quality": "Quality", "output": "Output"}
             widths = {"variant": 100, "samples": 80, "resolution": 90, "time": 80, "quality": 80, "output": 260}
             for column in columns:
-                self.sandbox_tree.heading(column, text=headings[column])
+                self.register_heading(self.sandbox_tree, column, headings[column])
                 self.sandbox_tree.column(column, width=widths[column], anchor="w")
             self.sandbox_tree.grid(row=1, column=0, sticky="nsew")
 
@@ -2026,6 +2113,28 @@ def run_gui(args: argparse.Namespace) -> int:
                 justify="left",
             ).grid(row=3, column=0, sticky="ew", pady=(14, 0))
 
+            ttk_module.Label(power_card, text="Interface", style="CardTitle.TLabel").grid(row=4, column=0, sticky="w", pady=(28, 0))
+            ttk_module.Label(
+                power_card,
+                text="Changes apply instantly and the selected language is remembered.",
+                style="CardHint.TLabel",
+                wraplength=300,
+                justify="left",
+            ).grid(row=5, column=0, sticky="ew", pady=(6, 14))
+            language_row = ttk_module.Frame(power_card, style="Surface.TFrame")
+            language_row.grid(row=6, column=0, sticky="ew")
+            language_row.columnconfigure(1, weight=1)
+            ttk_module.Label(language_row, text="Language", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+            self.language_combo = ttk_module.Combobox(
+                language_row,
+                textvariable=self.language_var,
+                values=tuple(LANGUAGE_LABELS.values()),
+                state="readonly",
+                width=18,
+            )
+            self.language_combo.grid(row=0, column=1, sticky="ew")
+            self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
+
             mobile_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="ew", padx=(0, 12), pady=(14, 0))
             mobile_card.columnconfigure(1, weight=1)
             ttk_module.Label(mobile_card, text="Mobile dashboard", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
@@ -2204,9 +2313,14 @@ def run_gui(args: argparse.Namespace) -> int:
             pending_count = len(self.render_queue.pending())
             total_count = len(self.render_queue.jobs)
             if total_count:
-                self.queue_summary_var.set(f"{total_count} projects · {pending_count} waiting")
+                self.set_localized(
+                    self.queue_summary_var,
+                    "{total} projects · {pending} waiting",
+                    total=total_count,
+                    pending=pending_count,
+                )
             else:
-                self.queue_summary_var.set("Queue is empty")
+                self.set_localized(self.queue_summary_var, "Queue is empty")
             if selected_job_id and self.queue_tree.exists(selected_job_id):
                 self.queue_tree.selection_set(selected_job_id)
                 self.queue_tree.focus(selected_job_id)
@@ -2214,7 +2328,7 @@ def run_gui(args: argparse.Namespace) -> int:
         def queue_job_from_current(self, blend_path: Path | None = None) -> RenderJob | None:
             blend_text = str(blend_path or self.blend_var.get().strip().strip('"'))
             if not blend_text or not Path(blend_text).exists():
-                messagebox.showerror("Blend file not found", "Choose an existing .blend file first.")
+                messagebox.showerror(self.tr("Blend file not found"), self.tr("Choose an existing .blend file first."))
                 return None
 
             frame_range = self.frame_range_values()
@@ -2223,7 +2337,7 @@ def run_gui(args: argparse.Namespace) -> int:
             start_frame, end_frame = frame_range
             output_path = self.frames_var.get().strip().strip('"')
             if not self.use_scene_output_var.get() and not output_path:
-                messagebox.showerror("Frames folder missing", "Choose an output folder or enable the .blend output path.")
+                messagebox.showerror(self.tr("Frames folder missing"), self.tr("Choose an output folder or enable the .blend output path."))
                 return None
             fps = self.parse_positive_float(self.video_fps_var.get(), 24.0, 1.0, 240.0)
             job = RenderJob(
@@ -2303,7 +2417,7 @@ def run_gui(args: argparse.Namespace) -> int:
             if self.queue_running or not self.render_queue.pending():
                 return
             blender = Path(self.blender_var.get().strip().strip('"'))
-            self.queue_summary_var.set("Analyzing queued projects…")
+            self.set_localized(self.queue_summary_var, "Analyzing queued projects…")
             threading.Thread(
                 target=self.estimate_queue_worker,
                 args=(blender, self.smart_queue_var.get()),
@@ -2356,6 +2470,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.auto_install_updates_var,
                 self.shutdown_after_render_var,
                 self.mobile_enabled_var,
+                self.language_var,
             ]
             for variable in variables:
                 variable.trace_add("write", lambda *_: self.schedule_config_save())
@@ -2400,6 +2515,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     "auto_install_updates": "1" if self.auto_install_updates_var.get() else "0",
                     "shutdown_after_render": "1" if self.shutdown_after_render_var.get() else "0",
                     "mobile_enabled": "1" if self.mobile_enabled_var.get() else "0",
+                    "language": self.language_code,
                 }
             )
 
@@ -2411,13 +2527,13 @@ def run_gui(args: argparse.Namespace) -> int:
             ]
             script_path = next((path for path in candidates if path.exists()), None)
             if not script_path:
-                messagebox.showerror("Publisher missing", "Publish To GitHub.cmd was not found near the app.")
+                messagebox.showerror(self.tr("Publisher missing"), self.tr("Publish To GitHub.cmd was not found near the app."))
                 return
             try:
                 subprocess.Popen(["cmd.exe", "/c", "start", "", str(script_path)], cwd=str(script_path.parent))
                 self.log(f"[WATCHDOG] GitHub publisher started: {script_path}")
             except Exception as error:
-                messagebox.showerror("Publisher failed", str(error))
+                messagebox.showerror(self.tr("Publisher failed"), str(error))
 
 
         def check_for_updates(self) -> None:
@@ -2426,7 +2542,7 @@ def run_gui(args: argparse.Namespace) -> int:
             if raw_update_source.strip() != update_source:
                 self.update_manifest_url_var.set(update_source)
             self.save_current_config()
-            self.update_status_var.set("Checking for updates...")
+            self.set_localized(self.update_status_var, "Checking for updates...")
             self.check_update_button.configure(state="disabled")
             self.install_update_button.configure(state="disabled")
             threading.Thread(target=self.update_check_worker, args=(update_source,), daemon=True).start()
@@ -2447,12 +2563,12 @@ def run_gui(args: argparse.Namespace) -> int:
         def install_latest_update(self, ask: bool = True) -> None:
             if not self.latest_update_manifest:
                 if ask:
-                    messagebox.showerror("No update", "Check updates first.")
+                    messagebox.showerror(self.tr("No update"), self.tr("Check updates first."))
                 return
             if ask:
                 should_install = messagebox.askyesno(
-                    "Install update",
-                    "The app will close, download the new version and restart. Install update?",
+                    self.tr("Install update"),
+                    self.tr("The app will close, download the new version and restart. Install update?"),
                 )
                 if not should_install:
                     return
@@ -2462,7 +2578,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.root.destroy()
             except Exception as error:
                 if ask:
-                    messagebox.showerror("Update failed", str(error))
+                    messagebox.showerror(self.tr("Update failed"), str(error))
                 else:
                     self.log(f"[WATCHDOG] Auto update failed: {error}")
 
@@ -2502,10 +2618,16 @@ def run_gui(args: argparse.Namespace) -> int:
             try:
                 frame = int(value)
             except ValueError:
-                messagebox.showerror("Invalid frame range", f"{field_name} должен быть числом.")
+                messagebox.showerror(
+                    self.tr("Invalid frame range"),
+                    self.tr("{field} must be a number.", field=self.tr(field_name)),
+                )
                 return None
             if frame < 0:
-                messagebox.showerror("Invalid frame range", f"{field_name} не может быть меньше 0.")
+                messagebox.showerror(
+                    self.tr("Invalid frame range"),
+                    self.tr("{field} cannot be less than 0.", field=self.tr(field_name)),
+                )
                 return None
             return frame
 
@@ -2520,7 +2642,10 @@ def run_gui(args: argparse.Namespace) -> int:
             if end_frame is None and self.end_frame_var.get().strip():
                 return None
             if start_frame is not None and end_frame is not None and start_frame > end_frame:
-                messagebox.showerror("Invalid frame range", "Start frame не может быть больше End frame.")
+                messagebox.showerror(
+                    self.tr("Invalid frame range"),
+                    self.tr("Start frame cannot be greater than End frame."),
+                )
                 return None
             return start_frame, end_frame
 
@@ -2530,7 +2655,10 @@ def run_gui(args: argparse.Namespace) -> int:
 
             settings = query_scene_settings(blender, blend, log=lambda message: self.log(message))
             if not settings:
-                messagebox.showerror("Scene output not found", "Не удалось прочитать путь сохранения из .blend файла.")
+                messagebox.showerror(
+                    self.tr("Scene output not found"),
+                    self.tr("Could not read the output path from the .blend file."),
+                )
                 return None
 
             output_path = str(settings.get("output_path") or "")
@@ -2570,10 +2698,16 @@ def run_gui(args: argparse.Namespace) -> int:
             frames_text = self.frames_var.get().strip().strip('"')
 
             if not frames_text and not self.use_scene_output_var.get():
-                messagebox.showerror("Frames folder missing", "Выбери папку для кадров или включи Use .blend output path.")
+                messagebox.showerror(
+                    self.tr("Frames folder missing"),
+                    self.tr("Choose a frames folder or enable Use .blend output path."),
+                )
                 return None
             if not self.use_cpu_var.get() and not self.use_gpu_var.get():
-                messagebox.showerror("Render device missing", "Выбери хотя бы CPU или GPU для рендера.")
+                messagebox.showerror(
+                    self.tr("Render device missing"),
+                    self.tr("Choose at least CPU or GPU for rendering."),
+                )
                 return None
 
             blender = Path(blender_text)
@@ -2581,10 +2715,10 @@ def run_gui(args: argparse.Namespace) -> int:
             frames = Path(frames_text) if frames_text else blend.parent
 
             if not blender.exists():
-                messagebox.showerror("Blender not found", "Не найден blender.exe. Выбери его вручную.")
+                messagebox.showerror(self.tr("Blender not found"), self.tr("blender.exe was not found. Choose it manually."))
                 return None
             if not blend.exists():
-                messagebox.showerror("Blend file not found", "Не найден .blend файл.")
+                messagebox.showerror(self.tr("Blend file not found"), self.tr("The .blend file was not found."))
                 return None
             return blender, blend, frames
 
@@ -2593,13 +2727,13 @@ def run_gui(args: argparse.Namespace) -> int:
             blend = Path(self.blend_var.get().strip().strip('"'))
             manual_output = Path(self.frames_var.get().strip().strip('"') or blend.parent)
             if not blend.exists() or not blender.exists():
-                messagebox.showerror("Project missing", "Choose an existing Blender executable and .blend project first.")
+                messagebox.showerror(self.tr("Project missing"), self.tr("Choose an existing Blender executable and .blend project first."))
                 return
             frame_range = self.frame_range_values()
             if frame_range is None:
                 return
-            self.prediction_var.set("Analyzing scene…")
-            self.autofix_var.set("Running preflight…")
+            self.set_localized(self.prediction_var, "Analyzing scene…")
+            self.set_localized(self.autofix_var, "Running preflight…")
             threading.Thread(
                 target=self.analysis_worker,
                 args=(
@@ -2655,7 +2789,11 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.use_gpu_var.set(True)
             fixed = sum(issue.fixed for issue in self.current_analysis_issues)
             self.save_current_config()
-            self.autofix_var.set(f"Applied {fixed} safe fix(es). Re-run preflight to verify.")
+            self.set_localized(
+                self.autofix_var,
+                "Applied {count} safe fix(es). Re-run preflight to verify.",
+                count=fixed,
+            )
             self.log(f"[AUTO FIX] Applied {fixed} safe fix(es).")
 
         def save_render_history(self) -> None:
@@ -2690,7 +2828,7 @@ def run_gui(args: argparse.Namespace) -> int:
             try:
                 frame = int(self.sandbox_frame_var.get().strip())
             except ValueError:
-                messagebox.showerror("Invalid frame", "Sandbox frame must be a number.")
+                messagebox.showerror(self.tr("Invalid frame"), self.tr("Sandbox frame must be a number."))
                 return
             samples = self.parse_positive_int(self.samples_var.get(), 256, 1, 100000)
             resolution = self.parse_positive_int(self.resolution_percent_var.get(), 100, 1, 100)
@@ -2699,7 +2837,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 SandboxVariant("Balanced", min(128, samples), min(75, resolution)),
                 SandboxVariant("Quality", samples, resolution),
             ]
-            self.sandbox_status_var.set("Running sandbox variants…")
+            self.set_localized(self.sandbox_status_var, "Running sandbox variants…")
             for item in self.sandbox_tree.get_children():
                 self.sandbox_tree.delete(item)
             sandbox_output = output / "watchdog_sandbox"
@@ -2728,10 +2866,14 @@ def run_gui(args: argparse.Namespace) -> int:
                 code = self.network_controller.start()
                 self.network_code_var.set(code)
                 self.network_join_code_var.set(code)
-                self.network_status_var.set(f"Controller ready · 0/{MAX_WORKERS} devices")
+                self.set_localized(
+                    self.network_status_var,
+                    "Controller ready · 0/{maximum} devices",
+                    maximum=MAX_WORKERS,
+                )
             except Exception as error:
                 self.network_controller = None
-                messagebox.showerror("Network controller", str(error))
+                messagebox.showerror(self.tr("Network controller"), str(error))
 
         def stop_network_controller(self) -> None:
             if self.network_controller:
@@ -2740,14 +2882,14 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_controller.stop()
             self.network_controller = None
             self.network_code_var.set("")
-            self.network_status_var.set("Controller is stopped")
+            self.set_localized(self.network_status_var, "Controller is stopped")
 
         def copy_network_code(self) -> None:
             code = self.network_code_var.get().strip()
             if code:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(code)
-                self.network_status_var.set("Connection code copied")
+                self.set_localized(self.network_status_var, "Connection code copied")
 
         def start_network_render(self) -> None:
             paths = self.validate_paths()
@@ -2769,9 +2911,9 @@ def run_gui(args: argparse.Namespace) -> int:
                 if self.use_scene_output_var.get()
                 else manual_output
             )
-            self.status_var.set("Network setup")
-            self.status_detail_var.set("Packing project assets for workers")
-            self.network_status_var.set("Preparing a packed project copy…")
+            self.set_localized(self.status_var, "Network setup")
+            self.set_localized(self.status_detail_var, "Packing project assets for workers")
+            self.set_localized(self.network_status_var, "Preparing a packed project copy…")
             controller = self.network_controller
             threading.Thread(
                 target=self.prepare_network_plan_worker,
@@ -2814,9 +2956,12 @@ def run_gui(args: argparse.Namespace) -> int:
             code = self.network_join_code_var.get().strip()
             blender = Path(self.blender_var.get().strip().strip('"'))
             if not code or not blender.exists():
-                messagebox.showerror("Worker setup", "Enter a connection code and choose blender.exe.")
+                messagebox.showerror(self.tr("Worker setup"), self.tr("Enter a connection code and choose blender.exe."))
                 return
-            if not messagebox.askyesno("Join render network", "This computer will download the project and render assigned frames. Ready to connect?"):
+            if not messagebox.askyesno(
+                self.tr("Join render network"),
+                self.tr("This computer will download the project and render assigned frames. Ready to connect?"),
+            ):
                 return
             try:
                 self.network_worker = NetworkWorker(
@@ -2830,7 +2975,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 threading.Thread(target=self.network_worker.run, daemon=True).start()
             except Exception as error:
                 self.network_worker = None
-                messagebox.showerror("Worker connection", str(error))
+                messagebox.showerror(self.tr("Worker connection"), str(error))
 
         def start_local_network_worker(self) -> None:
             if self.network_controller is None:
@@ -2855,7 +3000,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 end = int(self.worker_range_end_var.get()) if self.worker_range_end_var.get().strip() else None
                 self.network_controller.set_worker_range(str(selection[0]), start, end)
             except ValueError as error:
-                messagebox.showerror("Allocation", str(error))
+                messagebox.showerror(self.tr("Allocation"), str(error))
 
         def refresh_network_state(self) -> None:
             controller = self.network_controller
@@ -2872,19 +3017,34 @@ def run_gui(args: argparse.Namespace) -> int:
                             values=(worker.name, worker.hardware, worker.current_frame or "—", worker.completed_frames, format_duration(worker.average_seconds), allocation),
                         )
                     online = sum(time.time() - worker.last_seen < 30 for worker in controller.workers.values())
-                    self.network_status_var.set(f"Controller active · {online}/{MAX_WORKERS} devices")
+                    self.set_localized(
+                        self.network_status_var,
+                        "Controller active · {online}/{maximum} devices",
+                        online=online,
+                        maximum=MAX_WORKERS,
+                    )
                     if controller.plan:
                         summary = controller.plan.summary()
                         self.animate_progress(float(summary["progress"]))
-                        self.progress_text_var.set(f"{summary['completed']} / {summary['total']} network frames")
+                        self.set_localized(
+                            self.progress_text_var,
+                            "{completed} / {total} network frames",
+                            completed=summary["completed"],
+                            total=summary["total"],
+                        )
                         if summary["finished"] and not self.network_history_saved and self.network_session:
                             status = "completed" if int(summary["failed"]) == 0 else "failed"
                             self.render_history.add(self.network_session.finish(status))
                             self.save_render_history()
                             self.refresh_history_views()
                             self.network_history_saved = True
-                            self.status_var.set("Network complete")
-                            self.status_detail_var.set(f"{summary['completed']} complete · {summary['failed']} failed")
+                            self.set_localized(self.status_var, "Network complete")
+                            self.set_localized(
+                                self.status_detail_var,
+                                "{completed} complete · {failed} failed",
+                                completed=summary["completed"],
+                                failed=summary["failed"],
+                            )
                             send_notification("Blender Render Watchdog", "Distributed render finished.")
             self.refresh_mobile_state_cache()
             try:
@@ -2903,7 +3063,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def start_mobile_dashboard(self) -> None:
             if self.mobile_dashboard:
-                self.mobile_url_var.set(self.mobile_dashboard.public_url)
+                self.set_raw(self.mobile_url_var, self.mobile_dashboard.public_url)
                 return
             try:
                 self.mobile_dashboard = MobileDashboardServer(
@@ -2911,11 +3071,11 @@ def run_gui(args: argparse.Namespace) -> int:
                     action_handler=self.mobile_action_handler,
                     preview_provider=lambda: self.latest_frame_path,
                 )
-                self.mobile_url_var.set(self.mobile_dashboard.start())
+                self.set_raw(self.mobile_url_var, self.mobile_dashboard.start())
                 self.log(f"[MOBILE] Dashboard: {self.mobile_url_var.get()}")
             except Exception as error:
                 self.mobile_dashboard = None
-                self.mobile_url_var.set(f"Could not start: {error}")
+                self.set_localized(self.mobile_url_var, "Could not start: {error}", error=error)
 
         def copy_mobile_url(self) -> None:
             value = self.mobile_url_var.get()
@@ -2997,9 +3157,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.is_paused = False
             self.paused_queue = False
             self.progress_var.set(0.0)
-            self.progress_text_var.set("Starting")
-            self.status_var.set("Running")
-            self.status_detail_var.set("Blender process is active")
+            self.set_localized(self.progress_text_var, "Starting")
+            self.set_localized(self.status_var, "Running")
+            self.set_localized(self.status_detail_var, "Blender process is active")
             self.start_button.configure(state="disabled")
             self.pause_button.configure(state="normal")
             self.stop_button.configure(state="normal")
@@ -3122,15 +3282,15 @@ def run_gui(args: argparse.Namespace) -> int:
             blender_text = self.blender_var.get().strip().strip('"')
             blender = Path(blender_text)
             if not blender.exists():
-                messagebox.showerror("Blender not found", "Choose blender.exe on the Render tab first.")
+                messagebox.showerror(self.tr("Blender not found"), self.tr("Choose blender.exe on the Render tab first."))
                 return
             if not self.use_cpu_var.get() and not self.use_gpu_var.get():
-                messagebox.showerror("Render device missing", "Choose at least CPU or GPU for rendering.")
+                messagebox.showerror(self.tr("Render device missing"), self.tr("Choose at least CPU or GPU for rendering."))
                 return
 
             self.render_queue.reset_unfinished()
             if not self.render_queue.pending():
-                messagebox.showinfo("Queue complete", "There are no waiting projects in the queue.")
+                messagebox.showinfo(self.tr("Queue complete"), self.tr("There are no waiting projects in the queue."))
                 return
 
             if self.smart_queue_var.get():
@@ -3144,9 +3304,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.paused_queue = False
             self.queue_running = True
             self.progress_var.set(0.0)
-            self.progress_text_var.set("Queue starting")
-            self.status_var.set("Queue")
-            self.status_detail_var.set("Preparing the first project")
+            self.set_localized(self.progress_text_var, "Queue starting")
+            self.set_localized(self.status_var, "Queue")
+            self.set_localized(self.status_detail_var, "Preparing the first project")
             self.start_button.configure(state="disabled")
             self.start_queue_button.configure(state="disabled")
             self.pause_button.configure(state="normal")
@@ -3320,16 +3480,16 @@ def run_gui(args: argparse.Namespace) -> int:
         def pause_watchdog(self) -> None:
             if self.pause_event:
                 self.pause_event.set()
-                self.status_var.set("Pausing")
-                self.status_detail_var.set("Waiting for current frame to finish")
+                self.set_localized(self.status_var, "Pausing")
+                self.set_localized(self.status_detail_var, "Waiting for current frame to finish")
                 self.pause_button.configure(state="disabled")
                 self.log("[WATCHDOG] Pause requested. Waiting for current frame to finish...")
 
         def stop_watchdog(self) -> None:
             if self.stop_event:
                 self.stop_event.set()
-                self.status_var.set("Stopping")
-                self.status_detail_var.set("Terminating Blender safely")
+                self.set_localized(self.status_var, "Stopping")
+                self.set_localized(self.status_detail_var, "Terminating Blender safely")
                 self.pause_button.configure(state="disabled")
                 self.stop_button.configure(state="disabled")
                 self.log("Stopping watchdog...")
@@ -3343,7 +3503,8 @@ def run_gui(args: argparse.Namespace) -> int:
 
                 if message == "__WATCHDOG_DONE__":
                     if not self.is_paused:
-                        self.start_button.configure(text="Start render", state="normal")
+                        self.set_widget_text(self.start_button, "Start render")
+                        self.start_button.configure(state="normal")
                     self.start_queue_button.configure(state="normal")
                     self.pause_button.configure(state="disabled")
                     self.stop_button.configure(state="disabled")
@@ -3355,16 +3516,24 @@ def run_gui(args: argparse.Namespace) -> int:
                     output = Path(str(message[3]))
                     self.current_analysis_issues = issues
                     self.current_analysis_output = output
-                    self.prediction_var.set(
-                        f"≈ {format_duration(prediction.total_seconds)} total · {format_duration(prediction.seconds_per_frame)}/frame"
+                    self.set_localized(
+                        self.prediction_var,
+                        "≈ {total} total · {per_frame}/frame",
+                        total=format_duration(prediction.total_seconds),
+                        per_frame=format_duration(prediction.seconds_per_frame),
                     )
-                    self.memory_prediction_var.set(
-                        f"Memory ≈ {prediction.memory_mb / 1024:.1f} GB · {prediction.confidence} confidence · {prediction.source} · difficult frames: {', '.join(map(str, prediction.difficult_frames))}"
+                    self.set_localized(
+                        self.memory_prediction_var,
+                        "Memory ≈ {memory:.1f} GB · {confidence} confidence · {source} · difficult frames: {frames}",
+                        memory=prediction.memory_mb / 1024,
+                        confidence=prediction.confidence,
+                        source=prediction.source,
+                        frames=", ".join(map(str, prediction.difficult_frames)),
                     )
                     if issues:
-                        self.autofix_var.set("\n".join(f"[{issue.severity.upper()}] {issue.message}" for issue in issues[:7]))
+                        self.set_raw(self.autofix_var, "\n".join(f"[{issue.severity.upper()}] {issue.message}" for issue in issues[:7]))
                     else:
-                        self.autofix_var.set("No common problems found. Ready to render.")
+                        self.set_localized(self.autofix_var, "No common problems found. Ready to render.")
                     continue
 
                 if isinstance(message, tuple) and len(message) == 4 and message[0] == "__SANDBOX__":
@@ -3387,13 +3556,17 @@ def run_gui(args: argparse.Namespace) -> int:
                             ),
                         )
                     if error:
-                        self.sandbox_status_var.set(f"Sandbox failed: {error}")
+                        self.set_localized(self.sandbox_status_var, "Sandbox failed: {error}", error=error)
                     elif recommendation:
-                        self.sandbox_status_var.set(
-                            f"Recommended: {recommendation.variant.name} · {format_duration(recommendation.duration_seconds)} · quality {recommendation.quality_score:.0f}%"
+                        self.set_localized(
+                            self.sandbox_status_var,
+                            "Recommended: {variant} · {duration} · quality {quality}%",
+                            variant=recommendation.variant.name,
+                            duration=format_duration(recommendation.duration_seconds),
+                            quality=f"{recommendation.quality_score:.0f}",
                         )
                     else:
-                        self.sandbox_status_var.set("No sandbox variant completed successfully")
+                        self.set_localized(self.sandbox_status_var, "No sandbox variant completed successfully")
                     continue
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__QUEUE_REFRESH__":
@@ -3407,17 +3580,17 @@ def run_gui(args: argparse.Namespace) -> int:
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__NETWORK_STARTED__":
                     start = int(message[1])
                     end = int(message[2])
-                    self.status_var.set("Network render")
-                    self.status_detail_var.set(f"Distributing frames {start}-{end}")
-                    self.network_status_var.set("Distributed render is running")
+                    self.set_localized(self.status_var, "Network render")
+                    self.set_localized(self.status_detail_var, "Distributing frames {start}-{end}", start=start, end=end)
+                    self.set_localized(self.network_status_var, "Distributed render is running")
                     if self.network_controller and not self.network_controller.workers:
                         self.log("[NETWORK] No workers yet. Connect a device or choose Use this PC.")
                     continue
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__NETWORK_ERROR__":
-                    self.status_var.set("Network error")
-                    self.status_detail_var.set(str(message[1]))
-                    self.network_status_var.set(f"Could not start: {message[1]}")
+                    self.set_localized(self.status_var, "Network error")
+                    self.set_raw(self.status_detail_var, str(message[1]))
+                    self.set_localized(self.network_status_var, "Could not start: {error}", error=message[1])
                     continue
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__HISTORY_REFRESH__":
@@ -3449,8 +3622,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.refresh_queue_tree(job_id)
                     job = self.render_queue.get(job_id)
                     if status == "running" and job:
-                        self.status_var.set("Queue")
-                        self.status_detail_var.set(f"Rendering {job.project_name}")
+                        self.set_localized(self.status_var, "Queue")
+                        self.set_localized(self.status_detail_var, "Rendering {project}", project=job.project_name)
                     elif status == "failed" and job:
                         self.log(f"[WATCHDOG] Queue failed: {job.project_name} — {error}")
                     continue
@@ -3464,18 +3637,26 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.paused_queue = paused
                     self.refresh_queue_tree()
                     if paused:
-                        self.status_var.set("Paused")
-                        self.status_detail_var.set("Queue can continue from the next frame")
-                        self.start_queue_button.configure(text="Continue queue", state="normal")
+                        self.set_localized(self.status_var, "Paused")
+                        self.set_localized(self.status_detail_var, "Queue can continue from the next frame")
+                        self.set_widget_text(self.start_queue_button, "Continue queue")
+                        self.start_queue_button.configure(state="normal")
                         send_notification("Blender Render Watchdog", "Render queue paused after the current frame.")
                     elif self.stop_event and self.stop_event.is_set():
-                        self.status_var.set("Stopped")
-                        self.status_detail_var.set("Render queue stopped")
-                        self.start_queue_button.configure(text="Continue queue", state="normal")
+                        self.set_localized(self.status_var, "Stopped")
+                        self.set_localized(self.status_detail_var, "Render queue stopped")
+                        self.set_widget_text(self.start_queue_button, "Continue queue")
+                        self.start_queue_button.configure(state="normal")
                     else:
-                        self.status_var.set("Queue complete")
-                        self.status_detail_var.set(f"{completed} complete · {failed} failed")
-                        self.start_queue_button.configure(text="Start queue", state="normal")
+                        self.set_localized(self.status_var, "Queue complete")
+                        self.set_localized(
+                            self.status_detail_var,
+                            "{completed} complete · {failed} failed",
+                            completed=completed,
+                            failed=failed,
+                        )
+                        self.set_widget_text(self.start_queue_button, "Start queue")
+                        self.start_queue_button.configure(state="normal")
                         send_notification(
                             "Blender Render Watchdog",
                             f"Render queue finished: {completed} complete, {failed} failed.",
@@ -3490,8 +3671,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     if code == 0:
                         self.is_paused = False
                         self.paused_queue = False
-                        self.status_var.set("Complete")
-                        self.status_detail_var.set("Render finished normally")
+                        self.set_localized(self.status_var, "Complete")
+                        self.set_localized(self.status_detail_var, "Render finished normally")
                         send_notification("Blender Render Watchdog", "Render finished successfully.")
                         if self.shutdown_after_render_var.get():
                             self.log("[WATCHDOG] Shutdown enabled. Windows will shut down in 60 seconds.")
@@ -3500,21 +3681,22 @@ def run_gui(args: argparse.Namespace) -> int:
                     elif code == 131:
                         self.is_paused = True
                         self.paused_queue = False
-                        self.status_var.set("Paused")
-                        self.status_detail_var.set("Ready to resume from the next frame")
-                        self.start_button.configure(text="Resume Render", state="normal")
+                        self.set_localized(self.status_var, "Paused")
+                        self.set_localized(self.status_detail_var, "Ready to resume from the next frame")
+                        self.set_widget_text(self.start_button, "Resume Render")
+                        self.start_button.configure(state="normal")
                         send_notification("Blender Render Watchdog", "Render paused after current frame.")
                     elif code == 130:
                         self.is_paused = False
                         self.paused_queue = False
-                        self.status_var.set("Stopped")
-                        self.status_detail_var.set("Render stopped by user")
+                        self.set_localized(self.status_var, "Stopped")
+                        self.set_localized(self.status_detail_var, "Render stopped by user")
                         send_notification("Blender Render Watchdog", "Render stopped.")
                     else:
                         self.is_paused = False
                         self.paused_queue = False
-                        self.status_var.set("Error")
-                        self.status_detail_var.set(f"Process exited with code {code}")
+                        self.set_localized(self.status_var, "Error")
+                        self.set_localized(self.status_detail_var, "Process exited with code {code}", code=code)
                         send_notification("Blender Render Watchdog", f"Render exited with code {code}.")
                     continue
 
@@ -3522,7 +3704,16 @@ def run_gui(args: argparse.Namespace) -> int:
                     status = str(message[1])
                     text = str(message[2])
                     manifest = message[3]
-                    self.update_status_var.set(text)
+                    if status == "available" and isinstance(manifest, dict):
+                        self.set_localized(
+                            self.update_status_var,
+                            "Update available: {version}",
+                            version=str(manifest.get("version") or ""),
+                        )
+                    elif status == "current":
+                        self.set_localized(self.update_status_var, "Already latest: {version}", version=APP_VERSION)
+                    else:
+                        self.set_raw(self.update_status_var, text)
                     self.check_update_button.configure(state="normal")
                     if status == "available" and isinstance(manifest, dict):
                         self.latest_update_manifest = manifest
@@ -3540,7 +3731,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__PROGRESS__":
                     percent = float(message[1])
                     self.animate_progress(percent)
-                    self.progress_text_var.set(f"{percent:.0f}%  {message[2]}")
+                    self.set_raw(self.progress_text_var, f"{percent:.0f}%  {message[2]}")
                     continue
 
                 self.log(str(message))
@@ -3565,7 +3756,10 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def on_close(self) -> None:
             if self.worker and self.worker.is_alive():
-                should_close = messagebox.askyesno("Stop render", "Рендер сейчас запущен. Остановить Blender и закрыть окно?")
+                should_close = messagebox.askyesno(
+                    self.tr("Stop render"),
+                    self.tr("Render is running. Stop Blender and close the window?"),
+                )
                 if not should_close:
                     return
                 self.stop_watchdog()

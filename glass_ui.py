@@ -592,9 +592,27 @@ class GlassProgress(tk.Canvas):
 class GlassWidgetFactory:
     """Proxy ttk while replacing legacy-shaped interactive controls."""
 
-    def __init__(self, ttk_module, palette: dict[str, str]) -> None:
+    def __init__(self, ttk_module, palette: dict[str, str], translator=None, register=None) -> None:
         self.ttk = ttk_module
         self.palette = palette
+        self.translator = translator or (lambda text: text)
+        self.register = register
+
+    def _translated(self, kwargs: dict) -> tuple[dict, str | None]:
+        options = dict(kwargs)
+        source = options.get("text")
+        if isinstance(source, str):
+            options["text"] = self.translator(source)
+        else:
+            source = None
+        return options, source
+
+    def _finish(self, widget, source: str | None):
+        if source is not None:
+            widget._i18n_source = source
+            if self.register:
+                self.register(widget)
+        return widget
 
     def _backdrop(self, parent) -> str:
         try:
@@ -608,10 +626,19 @@ class GlassWidgetFactory:
         return self.palette["panel"]
 
     def Button(self, parent, **kwargs):
-        return GlassButton(parent, palette=self.palette, backdrop=self._backdrop(parent), **kwargs)
+        options, source = self._translated(kwargs)
+        widget = GlassButton(parent, palette=self.palette, backdrop=self._backdrop(parent), **options)
+        return self._finish(widget, source)
 
     def Checkbutton(self, parent, **kwargs):
-        return GlassSwitch(parent, palette=self.palette, backdrop=self._backdrop(parent), **kwargs)
+        options, source = self._translated(kwargs)
+        widget = GlassSwitch(parent, palette=self.palette, backdrop=self._backdrop(parent), **options)
+        return self._finish(widget, source)
+
+    def Label(self, parent, **kwargs):
+        options, source = self._translated(kwargs)
+        widget = self.ttk.Label(parent, **options)
+        return self._finish(widget, source)
 
     def Entry(self, parent, **kwargs):
         return GlassEntry(parent, palette=self.palette, backdrop=self._backdrop(parent), **kwargs)
@@ -791,8 +818,10 @@ class GlassCard(tk.Canvas):
 class GlassTabView(tk.Frame):
     """Rounded pill navigation with horizontally animated page transitions."""
 
-    def __init__(self, parent, *, palette=None, **kwargs) -> None:
+    def __init__(self, parent, *, palette=None, translator=None, register=None, **kwargs) -> None:
         self.palette = {**DEFAULT_PALETTE, **(palette or {})}
+        self.translator = translator or (lambda text: text)
+        self.register = register
         super().__init__(parent, background=self.palette["bg"], borderwidth=0, **kwargs)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -807,16 +836,20 @@ class GlassTabView(tk.Frame):
 
     def add(self, page, *, text: str) -> None:
         index = len(self.pages)
+        source = text.strip()
         self.pages.append(page)
         page.place_forget()
         button = GlassButton(
             self.nav,
-            text=text.strip(),
+            text=self.translator(source),
             style="Tab.TButton",
             command=lambda value=index: self.select(value),
             palette=self.palette,
             backdrop=self.palette["bg"],
         )
+        button._i18n_source = source
+        if self.register:
+            self.register(button)
         button.pack(side="left", padx=(0, 7))
         self.buttons.append(button)
         if self.current_index < 0:
