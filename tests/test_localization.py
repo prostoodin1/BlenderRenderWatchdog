@@ -1,8 +1,11 @@
+import ast
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from localization import (
     LANGUAGE_LABELS,
+    RUSSIAN_TRANSLATIONS,
     language_code_from_label,
     normalize_language,
     translate,
@@ -38,6 +41,21 @@ class LocalizationTests(unittest.TestCase):
     def test_english_and_unknown_strings_fall_back_cleanly(self) -> None:
         self.assertEqual(translate("Settings", "en"), "Settings")
         self.assertEqual(translate("Blender-specific value", "ru"), "Blender-specific value")
+
+    def test_visible_literal_widget_text_has_a_russian_translation(self) -> None:
+        source_path = Path(__file__).parents[1] / "blender_render_watchdog.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8-sig"))
+        visible_strings: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "text" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                    visible_strings.add(keyword.value.value.strip())
+
+        language_neutral = {"", "%", "↑", "↓", "Blender", "Blender Render Watchdog", "CPU", "GPU"}
+        missing = sorted(visible_strings - language_neutral - set(RUSSIAN_TRANSLATIONS))
+        self.assertEqual(missing, [])
 
     @patch("localization.locale.getlocale", return_value=("ru_RU", "UTF-8"))
     def test_russian_system_locale_is_detected(self, _getlocale) -> None:

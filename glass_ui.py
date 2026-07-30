@@ -391,6 +391,7 @@ class GlassSwitch(tk.Canvas):
             self.widget_state = str(options.pop("state"))
         if "text" in options:
             self.text = str(options.pop("text"))
+            super().configure(width=max(88, 60 + len(self.text) * 7))
         if options:
             super().configure(**options)
         self._draw()
