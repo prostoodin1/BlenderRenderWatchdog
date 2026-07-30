@@ -23,15 +23,20 @@ if (Test-Path -LiteralPath $DistDir) {
     Remove-Item -LiteralPath $DistDir -Recurse -Force
 }
 
-pyinstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --onefile `
-    --name "BlenderRenderWatchdog" `
-    --distpath "$DistDir" `
-    --workpath "$BuildDir" `
-    "$Source"
+Push-Location $PackageDir
+try {
+    pyinstaller `
+        --noconfirm `
+        --clean `
+        --windowed `
+        --onefile `
+        --name "BlenderRenderWatchdog" `
+        --distpath "$DistDir" `
+        --workpath "$BuildDir" `
+        ".\blender_render_watchdog.py"
+} finally {
+    Pop-Location
+}
 
 if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Build finished, but exe was not found: $ExePath"

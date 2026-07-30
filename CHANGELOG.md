@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.0 — 2026-07-30
+
+### Matte glass interface
+
+- Replaced classic ttk cards, tabs, buttons, entries and checkboxes with rounded Canvas-backed controls.
+- Added layered matte surfaces, soft shadows, focus rings, top highlights and a calmer navy/violet palette.
+- Rebalanced the Advanced layout for the wider animated controls.
+
+### Motion and interaction
+
+- Added eased page slides, button hover and press states, click ripples and animated toggle thumbs.
+- Added staggered card-light sweeps, hover glow, status pulses and a shimmer progress indicator.
+- Reworked progress interpolation so repeated updates share one animation loop.
+- Updated the phone dashboard with glass surfaces, responsive motion and reduced-motion support.
+
+### Engineering
+
+- Added reusable `glass_ui.py` primitives and unit tests for colour/path animation math.
+- Kept 2.1 work split into reviewable design, motion and release commits.
+
 ## 2.0.0 — 2026-07-30
 
 ### Interface and workflow

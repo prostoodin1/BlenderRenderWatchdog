@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from blender_render_watchdog import build_blender_command, find_last_frame, run_watchdog
+from blender_render_watchdog import APP_VERSION, build_blender_command, find_last_frame, run_watchdog
+
+
+class ReleaseVersionTests(unittest.TestCase):
+    def test_release_version_is_21(self) -> None:
+        self.assertEqual(APP_VERSION, "2.1.0")
 
 
 class FrameDetectionTests(unittest.TestCase):

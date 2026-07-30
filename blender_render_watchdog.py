@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
+from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from mobile_dashboard import MobileDashboardServer
 from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator, prepare_network_project
 from render_analytics import RenderHistory, RenderSession, estimate_render
@@ -61,7 +62,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1243,21 +1244,24 @@ def run_gui(args: argparse.Namespace) -> int:
             self.root.minsize(1080, 720)
 
             self.colors = {
-                "bg": "#070814",
-                "panel": "#101827",
-                "panel_alt": "#172033",
-                "field": "#080d19",
-                "field_border": "#33415f",
+                "bg": "#070a12",
+                "panel": "#111a2a",
+                "panel_alt": "#18243a",
+                "field": "#0b1220",
+                "field_border": "#2d3c58",
                 "text": "#f8fbff",
-                "muted": "#98a7c2",
-                "soft": "#d7e2f3",
-                "accent": "#7c5cff",
-                "accent_dark": "#5b3dff",
+                "muted": "#9aa9c2",
+                "soft": "#dce6f7",
+                "accent": "#8b7cff",
+                "accent_hot": "#aa9cff",
+                "accent_blue": "#6ee7ff",
+                "accent_dark": "#6553e8",
                 "accent_green": "#55f7b0",
-                "danger": "#ff5f7e",
+                "danger": "#ff6b8b",
                 "warning": "#ffd166",
-                "line": "#2b3a59",
-                "line_hot": "#6ae6ff",
+                "line": "#2d3c58",
+                "line_hot": "#7797c7",
+                "shadow": "#03050a",
             }
 
             self.config = load_config()
@@ -1281,6 +1285,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.current_analysis_output: Path | None = None
             self.hardware_poll_running = False
             self.mobile_state_cache: dict[str, object] = {}
+            self.glass_cards: list[GlassCard] = []
+            self.card_reveal_index = 0
+            self.progress_animation_id: str | None = None
+            self.progress_animation_target = 0.0
 
             saved_blender = args.blender or self.config.get("blender") or ""
             if not saved_blender:
@@ -1376,6 +1384,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.root.configure(bg=c["bg"])
             style.configure("App.TFrame", background=c["bg"])
             style.configure("Surface.TFrame", background=c["panel"])
+            style.configure("GlassSurface.TFrame", background=c["panel"])
             style.configure("SurfaceAlt.TFrame", background=c["panel_alt"])
             style.configure("CardBorder.TFrame", background=c["line"])
             style.configure("Top.TFrame", background=c["bg"])
@@ -1404,6 +1413,22 @@ def run_gui(args: argparse.Namespace) -> int:
             style.configure("Modern.TNotebook", background=c["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
             style.configure("Modern.TNotebook.Tab", background=c["panel"], foreground=c["muted"], padding=(22, 12), font=("Segoe UI", 10, "bold"))
             style.map("Modern.TNotebook.Tab", background=[("selected", c["panel_alt"]), ("active", "#1b2942")], foreground=[("selected", c["accent"]), ("active", c["text"])])
+            style.configure(
+                "Glass.TCombobox",
+                fieldbackground=c["field"],
+                background=c["field"],
+                foreground=c["text"],
+                arrowcolor=c["muted"],
+                borderwidth=0,
+                padding=(2, 4),
+            )
+            style.map(
+                "Glass.TCombobox",
+                fieldbackground=[("readonly", c["field"])],
+                foreground=[("readonly", c["text"])],
+                selectbackground=[("readonly", c["field"])],
+                selectforeground=[("readonly", c["text"])],
+            )
 
             style.configure(
                 "Queue.Treeview",
@@ -1425,6 +1450,7 @@ def run_gui(args: argparse.Namespace) -> int:
             )
         def build_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
             c = self.colors
+            ttk_module = GlassWidgetFactory(ttk_module, c)
             outer = ttk_module.Frame(self.root, style="App.TFrame", padding=22)
             outer.pack(fill="both", expand=True)
             outer.columnconfigure(0, weight=1)
@@ -1443,55 +1469,57 @@ def run_gui(args: argparse.Namespace) -> int:
 
             chip_row = ttk_module.Frame(top, style="Top.TFrame")
             chip_row.grid(row=2, column=0, sticky="w", pady=(14, 0))
-            ttk_module.Label(chip_row, text="Smart queue", style="Chip.TLabel").grid(row=0, column=0, sticky="w")
-            ttk_module.Label(chip_row, text="Network ×5", style="Chip.TLabel").grid(row=0, column=1, sticky="w", padx=(8, 0))
-            ttk_module.Label(chip_row, text="Mobile control", style="Chip.TLabel").grid(row=0, column=2, sticky="w", padx=(8, 0))
-            ttk_module.Label(chip_row, text="History + Auto Fix", style="Chip.TLabel").grid(row=0, column=3, sticky="w", padx=(8, 0))
+            ttk_module.Button(chip_row, text="Smart queue", style="Chip.TButton").grid(row=0, column=0, sticky="w")
+            ttk_module.Button(chip_row, text="Network ×5", style="Chip.TButton").grid(row=0, column=1, sticky="w", padx=(8, 0))
+            ttk_module.Button(chip_row, text="Mobile control", style="Chip.TButton").grid(row=0, column=2, sticky="w", padx=(8, 0))
+            ttk_module.Button(chip_row, text="History + Auto Fix", style="Chip.TButton").grid(row=0, column=3, sticky="w", padx=(8, 0))
 
             status_card = self.make_card(top, ttk_module, row=0, column=1, rowspan=3, padx=(18, 0))
+            self.status_card = status_card._glass_shell
             ttk_module.Label(status_card, text="CURRENT STATE", style="Mini.TLabel").pack(anchor="w")
             ttk_module.Label(status_card, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 0))
             ttk_module.Label(status_card, textvariable=self.status_detail_var, style="StatusDetail.TLabel").pack(anchor="w", pady=(6, 0))
+            self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
 
-            self.notebook = ttk_module.Notebook(outer, style="Modern.TNotebook")
+            self.notebook = GlassTabView(outer, palette=c)
             self.notebook.grid(row=1, column=0, sticky="nsew")
 
-            render_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            render_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             render_tab.columnconfigure(0, weight=1)
             render_tab.rowconfigure(1, weight=1)
             self.notebook.add(render_tab, text="  Render  ")
 
-            queue_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            queue_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             queue_tab.columnconfigure(0, weight=1)
             queue_tab.rowconfigure(0, weight=1)
             self.notebook.add(queue_tab, text="  Queue  ")
 
-            network_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            network_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             network_tab.columnconfigure(0, weight=1)
             network_tab.rowconfigure(0, weight=1)
             self.notebook.add(network_tab, text="  Network  ")
 
-            insights_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            insights_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             insights_tab.columnconfigure(0, weight=1)
             insights_tab.rowconfigure(0, weight=1)
             self.notebook.add(insights_tab, text="  Insights  ")
 
-            sandbox_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            sandbox_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             sandbox_tab.columnconfigure(0, weight=1)
             sandbox_tab.rowconfigure(0, weight=1)
             self.notebook.add(sandbox_tab, text="  Sandbox  ")
 
-            advanced_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            advanced_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             advanced_tab.columnconfigure(0, weight=1)
             advanced_tab.rowconfigure(0, weight=1)
             self.notebook.add(advanced_tab, text="  Advanced  ")
 
-            settings_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            settings_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             settings_tab.columnconfigure(0, weight=1)
             settings_tab.rowconfigure(0, weight=1)
             self.notebook.add(settings_tab, text="  Settings  ")
 
-            logs_tab = ttk_module.Frame(self.notebook, style="App.TFrame", padding=(0, 18, 0, 0))
+            logs_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
             logs_tab.columnconfigure(0, weight=1)
             logs_tab.rowconfigure(0, weight=1)
             self.notebook.add(logs_tab, text="  Logs  ")
@@ -1810,7 +1838,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.sandbox_tree.grid(row=1, column=0, sticky="nsew")
 
         def build_advanced_tab(self, parent, ttk_module) -> None:
-            parent.columnconfigure(0, weight=2)
+            parent.columnconfigure(0, weight=3)
             parent.columnconfigure(1, weight=1)
             parent.rowconfigure(1, weight=1)
 
@@ -1853,7 +1881,6 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Label(render_card, text="%", style="CardHint.TLabel").grid(row=2, column=2, sticky="w", padx=(6, 0), pady=(10, 0))
             ttk_module.Label(render_card, text="Crash retries", style="Field.TLabel").grid(row=2, column=4, sticky="e", padx=(12, 6), pady=(10, 0))
             ttk_module.Entry(render_card, textvariable=self.max_restarts_var, width=7).grid(row=2, column=5, sticky="w", pady=(10, 0))
-            ttk_module.Label(render_card, text="Then continue queue", style="CardHint.TLabel").grid(row=2, column=6, sticky="w", padx=(8, 0), pady=(10, 0))
 
             ttk_module.Label(render_card, text="Output mode", style="Field.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
             mode_combo = ttk_module.Combobox(render_card, textvariable=self.render_mode_var, values=("frames", "video"), state="readonly", width=12)
@@ -2021,11 +2048,12 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Checkbutton(parent, text=title, variable=variable, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=row, column=0, sticky="w", pady=6)
             ttk_module.Label(parent, text=hint, style="CardHint.TLabel").grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
         def make_card(self, parent, ttk_module, row: int, column: int, sticky: str = "nsew", padx=0, pady=0, rowspan: int = 1):
-            border = ttk_module.Frame(parent, style="CardBorder.TFrame", padding=1)
-            border.grid(row=row, column=column, rowspan=rowspan, sticky=sticky, padx=padx, pady=pady)
-            frame = ttk_module.Frame(border, style="Surface.TFrame", padding=18)
-            frame.pack(fill="both", expand=True)
-            return frame
+            card = GlassCard(parent, palette=self.colors, padding=18, radius=24, backdrop=self.colors["bg"])
+            card.grid(row=row, column=column, rowspan=rowspan, sticky=sticky, padx=padx, pady=pady)
+            self.glass_cards.append(card)
+            card.reveal(self.card_reveal_index * 38)
+            self.card_reveal_index += 1
+            return card.content
 
         def add_path_row(self, parent, ttk_module, row: int, label: str, variable: tk.StringVar, command) -> tuple[object, object, object]:
             label_widget = ttk_module.Label(parent, text=label, style="Field.TLabel")
@@ -2088,29 +2116,42 @@ def run_gui(args: argparse.Namespace) -> int:
 
             def step(value: int = 0) -> None:
                 try:
-                    self.root.attributes("-alpha", min(1.0, value / 10.0))
+                    progress = min(1.0, value / 18.0)
+                    eased = 1 - (1 - progress) ** 3
+                    self.root.attributes("-alpha", eased)
                 except tk.TclError:
                     return
-                if value < 10:
-                    self.root.after(24, lambda: step(value + 1))
+                if value < 18:
+                    self.root.after(16, lambda: step(value + 1))
 
             step()
 
         def animate_tab_change(self, _event=None) -> None:
-            try:
-                self.root.attributes("-alpha", 0.96)
-                self.root.after(45, lambda: self.root.attributes("-alpha", 1.0))
-            except tk.TclError:
-                pass
+            def reveal_visible_cards() -> None:
+                delay = 0
+                for card in self.glass_cards:
+                    if card.winfo_ismapped():
+                        card.reveal(delay)
+                        delay += 34
+
+            self.root.after(20, reveal_visible_cards)
 
         def animate_progress(self, target: float) -> None:
-            target = max(0.0, min(100.0, target))
-            current = float(self.progress_var.get())
-            if abs(target - current) < 0.5:
-                self.progress_var.set(target)
+            self.progress_animation_target = max(0.0, min(100.0, target))
+            if self.progress_animation_id is not None:
                 return
-            self.progress_var.set(current + (target - current) * 0.35)
-            self.root.after(35, lambda: self.animate_progress(target))
+
+            def step() -> None:
+                current = float(self.progress_var.get())
+                distance = self.progress_animation_target - current
+                if abs(distance) < 0.35:
+                    self.progress_var.set(self.progress_animation_target)
+                    self.progress_animation_id = None
+                    return
+                self.progress_var.set(current + distance * 0.24)
+                self.progress_animation_id = self.root.after(16, step)
+
+            step()
 
         def update_manual_controls(self) -> None:
             show_frames = not self.use_scene_output_var.get()
