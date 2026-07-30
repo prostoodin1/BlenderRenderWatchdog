@@ -10,6 +10,7 @@ $SourceFiles = @(
     "blender_render_watchdog.py",
     "auto_fix.py",
     "glass_ui.py",
+    "localization.py",
     "mobile_dashboard.py",
     "network_render.py",
     "render_analytics.py",

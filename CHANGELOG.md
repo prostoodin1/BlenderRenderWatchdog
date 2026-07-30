@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.1.1 — 2026-07-31
+
+### Interface languages
+
+- Added an instant language selector to Settings with English and Russian.
+- Localized navigation, cards, actions, table headings, dialogs and live render states.
+- Saved the selected language in the existing user configuration and detected Russian on first launch when Windows uses a Russian locale.
+- Filled the unused Settings space with a balanced Interface section instead of adding another crowded card.
+
+### Engineering
+
+- Added a dependency-free localization module with formatted status messages and English fallbacks.
+- Added localization tests and included the new module in source installs and CI compilation.
+
 ## 2.1.0 — 2026-07-30
 
 ### Matte glass interface
