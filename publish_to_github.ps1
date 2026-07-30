@@ -69,8 +69,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Uploading release assets..." -ForegroundColor Cyan
-gh release view $Tag --repo $Repo 1>$null 2>$null
-if ($LASTEXITCODE -eq 0) {
+$releaseExists = $false
+try {
+    gh release view $Tag --repo $Repo 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
+} catch {
+    $releaseExists = $false
+}
+
+if ($releaseExists) {
     gh release upload $Tag $Exe $Manifest --repo $Repo --clobber
 } else {
     if (Test-Path -LiteralPath $ReleaseNotes) {
