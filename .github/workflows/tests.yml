@@ -1,0 +1,19 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile sources
+        run: python -m py_compile blender_render_watchdog.py auto_fix.py mobile_dashboard.py network_render.py render_analytics.py render_queue.py render_sandbox.py video_tools.py
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

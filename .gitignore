@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+build_fixed/
+dist/
+github_release/
+release-v*/
+*_extracted/
+blender_render_watchdog_config.json
+.pytest_cache/

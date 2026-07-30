@@ -1,0 +1,16 @@
+GitHub update setup
+===================
+
+Repository:
+https://github.com/prostoodin1/BlenderRenderWatchdog
+
+Release workflow:
+1. Run build_exe.bat and verify dist/BlenderRenderWatchdog.exe.
+2. Run Publish To GitHub.cmd.
+3. The publisher reads APP_VERSION from blender_render_watchdog.py.
+4. It creates or updates the matching GitHub release and uploads:
+   - BlenderRenderWatchdog.exe
+   - update_manifest.json
+
+The application checks the latest GitHub release by default, so no manual manifest
+URL is required. A custom manifest URL can still be entered in Settings.
