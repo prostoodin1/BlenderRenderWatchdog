@@ -1,13 +1,9 @@
-# Blender Render Watchdog 2.2.0
+# Blender Render Watchdog 2.2.1
 
-Version 2.2 makes multi-device rendering easier to understand and start.
+Version 2.2.1 removes the terminal window that could flash during background hardware detection.
 
 Highlights:
 
-- a clear Connect / Become main role choice on the Network tab;
-- the main computer generates a secure connection code to share;
-- joining computers connect by entering that code;
-- connected devices and their live work remain visible in one list;
-- the main computer can automatically participate in rendering;
-- pull-based scheduling automatically gives the next frame to every free device;
-- English and Russian remain available and switch instantly in Settings.
+- PowerShell and WMIC hardware checks now run without creating a console window on Windows;
+- the 15-second GPU hot-plug check remains active in the background;
+- network rendering, automatic balancing and English/Russian localization remain unchanged.
