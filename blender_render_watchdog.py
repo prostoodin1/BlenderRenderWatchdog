@@ -63,7 +63,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.2.0"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1354,6 +1354,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.autofix_var, "Preflight has not been run")
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value="")
+            self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
+            self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
             self.network_status_var = tk.StringVar()
             self.worker_name_var = tk.StringVar(value=platform.node() or self.tr("Render worker"))
             self.set_localized(self.network_status_var, "Controller is stopped")
@@ -1803,9 +1805,22 @@ def run_gui(args: argparse.Namespace) -> int:
             parent.columnconfigure(1, weight=2)
             parent.rowconfigure(1, weight=1)
 
-            controller_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+            role_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+            role_card.columnconfigure(0, weight=1)
+            ttk_module.Label(role_card, text="Choose this device's role", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk_module.Label(
+                role_card,
+                text="Connect to another computer or make this computer the main render controller.",
+                style="CardHint.TLabel",
+                wraplength=350,
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 12))
+            ttk_module.Button(role_card, text="Connect", command=lambda: self.set_network_role("connect")).grid(row=2, column=0, sticky="ew", padx=(0, 5))
+            ttk_module.Button(role_card, text="Become main", style="Primary.TButton", command=lambda: self.set_network_role("host")).grid(row=2, column=1, sticky="ew", padx=(5, 0))
+
+            controller_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
+            self.network_controller_card = controller_card._glass_shell
             controller_card.columnconfigure(0, weight=1)
-            ttk_module.Label(controller_card, text="Controller", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk_module.Label(controller_card, text="Main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(controller_card, text="Create a LAN code and distribute individual frames to up to five PCs.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
             ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=2, column=0, sticky="ew")
             controller_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
@@ -1813,12 +1828,20 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Button(controller_actions, text="Start controller", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0)
             ttk_module.Button(controller_actions, text="Copy code", command=self.copy_network_code).grid(row=0, column=1, padx=(8, 0))
             ttk_module.Button(controller_actions, text="Stop", command=self.stop_network_controller).grid(row=0, column=2, padx=(8, 0))
-            ttk_module.Button(controller_card, text="Start distributed render", command=self.start_network_render).grid(row=4, column=0, sticky="ew", pady=(10, 0))
-            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=5, column=0, sticky="w", pady=(10, 0))
+            ttk_module.Checkbutton(
+                controller_card,
+                text="Use this computer for rendering",
+                variable=self.network_use_local_var,
+                command=self.save_current_config,
+                style="Modern.TCheckbutton",
+            ).grid(row=4, column=0, sticky="w", pady=(10, 0))
+            ttk_module.Button(controller_card, text="Start render", style="Primary.TButton", command=self.start_network_render).grid(row=5, column=0, sticky="ew", pady=(10, 0))
+            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=6, column=0, sticky="w", pady=(10, 0))
 
             worker_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
+            self.network_worker_card = worker_card._glass_shell
             worker_card.columnconfigure(0, weight=1)
-            ttk_module.Label(worker_card, text="Worker mode", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk_module.Label(worker_card, text="Connect to main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(worker_card, text="Enter the code on another computer. The project is downloaded automatically.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
             ttk_module.Label(worker_card, text="This PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
             ttk_module.Entry(worker_card, textvariable=self.worker_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
@@ -1826,9 +1849,8 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Entry(worker_card, textvariable=self.network_join_code_var).grid(row=5, column=0, sticky="ew", pady=(4, 10))
             worker_actions = ttk_module.Frame(worker_card, style="Surface.TFrame")
             worker_actions.grid(row=6, column=0, sticky="ew")
-            ttk_module.Button(worker_actions, text="Connect and render", style="Primary.TButton", command=self.start_network_worker).grid(row=0, column=0)
-            ttk_module.Button(worker_actions, text="Use this PC", command=self.start_local_network_worker).grid(row=0, column=1, padx=(8, 0))
-            ttk_module.Button(worker_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=2, padx=(8, 0))
+            ttk_module.Button(worker_actions, text="Connect", style="Primary.TButton", command=self.start_network_worker).grid(row=0, column=0)
+            ttk_module.Button(worker_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=1, padx=(8, 0))
 
             nodes_card = self.make_card(parent, ttk_module, row=0, column=1, rowspan=2, sticky="nsew", padx=(12, 0))
             nodes_card.columnconfigure(0, weight=1)
@@ -1850,6 +1872,7 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Entry(allocation, textvariable=self.worker_range_end_var, width=9).grid(row=0, column=3, padx=(4, 10))
             ttk_module.Button(allocation, text="Apply", command=self.apply_network_allocation).grid(row=0, column=4)
             ttk_module.Label(allocation, text="Leave empty for automatic balancing", style="CardHint.TLabel").grid(row=0, column=5, sticky="w", padx=(10, 0))
+            self.root.after_idle(self.update_network_role_view)
 
         def build_insights_tab(self, parent, ttk_module) -> None:
             parent.columnconfigure(0, weight=1)
@@ -2471,6 +2494,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.shutdown_after_render_var,
                 self.mobile_enabled_var,
                 self.language_var,
+                self.network_role_var,
+                self.network_use_local_var,
             ]
             for variable in variables:
                 variable.trace_add("write", lambda *_: self.schedule_config_save())
@@ -2516,6 +2541,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     "shutdown_after_render": "1" if self.shutdown_after_render_var.get() else "0",
                     "mobile_enabled": "1" if self.mobile_enabled_var.get() else "0",
                     "language": self.language_code,
+                    "network_role": self.network_role_var.get(),
+                    "network_use_local": "1" if self.network_use_local_var.get() else "0",
                 }
             )
 
@@ -2854,6 +2881,21 @@ def run_gui(args: argparse.Namespace) -> int:
             except Exception as error:
                 self.log_queue.put(("__SANDBOX__", [], None, str(error)))
 
+        def set_network_role(self, role: str) -> None:
+            self.network_role_var.set("host" if role == "host" else "connect")
+            self.update_network_role_view()
+            self.save_current_config()
+
+        def update_network_role_view(self) -> None:
+            if not hasattr(self, "network_controller_card") or not hasattr(self, "network_worker_card"):
+                return
+            if self.network_role_var.get() == "host":
+                self.network_worker_card.grid_remove()
+                self.network_controller_card.grid()
+            else:
+                self.network_controller_card.grid_remove()
+                self.network_worker_card.grid()
+
         def start_network_controller(self) -> None:
             if self.network_controller is not None:
                 self.network_code_var.set(self.network_controller.pairing_code)
@@ -2899,6 +2941,9 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.start_network_controller()
             if self.network_controller is None:
                 return
+            if self.network_use_local_var.get() and self.network_worker is None:
+                self.network_join_code_var.set(self.network_controller.pairing_code)
+                self.start_network_worker(confirm=False)
             blender, blend, manual_output = paths
             frame_range = self.frame_range_values()
             if frame_range is None:
@@ -2950,7 +2995,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_session.mark_frame(frame)
             self.log_queue.put(("__NETWORK_FRAME__", frame, str(path)))
 
-        def start_network_worker(self) -> None:
+        def start_network_worker(self, confirm: bool = True) -> None:
             if self.network_worker is not None:
                 return
             code = self.network_join_code_var.get().strip()
@@ -2958,7 +3003,7 @@ def run_gui(args: argparse.Namespace) -> int:
             if not code or not blender.exists():
                 messagebox.showerror(self.tr("Worker setup"), self.tr("Enter a connection code and choose blender.exe."))
                 return
-            if not messagebox.askyesno(
+            if confirm and not messagebox.askyesno(
                 self.tr("Join render network"),
                 self.tr("This computer will download the project and render assigned frames. Ready to connect?"),
             ):
@@ -2972,10 +3017,20 @@ def run_gui(args: argparse.Namespace) -> int:
                     cache_folder=app_config_dir() / "network_worker",
                     on_event=lambda message: self.log_queue.put(message),
                 )
-                threading.Thread(target=self.network_worker.run, daemon=True).start()
+                worker = self.network_worker
+                threading.Thread(target=self.run_network_worker, args=(worker,), daemon=True).start()
             except Exception as error:
                 self.network_worker = None
                 messagebox.showerror(self.tr("Worker connection"), str(error))
+
+        def run_network_worker(self, worker: NetworkWorker) -> None:
+            try:
+                worker.run()
+            except Exception as error:
+                self.log_queue.put(f"[NETWORK] Worker stopped: {error}")
+            finally:
+                if self.network_worker is worker:
+                    self.network_worker = None
 
         def start_local_network_worker(self) -> None:
             if self.network_controller is None:

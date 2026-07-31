@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.2.0 — 2026-07-31
+
+### Easier multi-device rendering
+
+- Reworked the Network tab around two explicit roles: Connect and Become main.
+- Kept the connection-code field and connected-device list visible in the role where they are needed.
+- Added automatic participation of the main computer when a distributed render starts.
+- Preserved automatic pull-based load balancing, hot-plug workers, retries and optional manual frame ranges.
+
+### Languages
+
+- Kept the complete English and Russian interface with instant switching and saved language preference.
+- Added Russian translations for all new 2.2 network controls.
+
 ## 2.1.1 — 2026-07-31
 
 ### Interface languages
