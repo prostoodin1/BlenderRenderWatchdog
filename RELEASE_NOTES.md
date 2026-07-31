@@ -1,12 +1,13 @@
-# Blender Render Watchdog 2.1.1
+# Blender Render Watchdog 2.2.0
 
-This patch makes the 2.1 matte-glass interface bilingual.
+Version 2.2 makes multi-device rendering easier to understand and start.
 
 Highlights:
 
-- English and Russian are available in Settings;
-- the interface changes language instantly without restarting;
-- the selected language is saved between launches;
-- navigation, cards, buttons, tables, dialogs and live status messages are localized;
-- the new Interface section uses the previously empty area in Settings;
-- existing settings, queues and render history remain compatible.
+- a clear Connect / Become main role choice on the Network tab;
+- the main computer generates a secure connection code to share;
+- joining computers connect by entering that code;
+- connected devices and their live work remain visible in one list;
+- the main computer can automatically participate in rendering;
+- pull-based scheduling automatically gives the next frame to every free device;
+- English and Russian remain available and switch instantly in Settings.

@@ -1,4 +1,4 @@
-# Blender Render Watchdog 2.1
+# Blender Render Watchdog 2.2
 
 > В версии 2.1.1 в **Settings → Interface** добавлен мгновенный выбор языка: English и Русский. Выбор сохраняется между запусками.
 
