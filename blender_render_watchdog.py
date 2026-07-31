@@ -63,7 +63,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.2.1"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -110,6 +110,13 @@ def save_config(config: dict[str, str]) -> None:
         json.dumps(config, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def hidden_subprocess_kwargs(platform_name: str | None = None) -> dict[str, int]:
+    """Prevent background console tools from flashing a terminal on Windows."""
+    if (platform_name or os.name) != "nt":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
 
 def send_notification(title: str, message: str) -> None:
     if os.name != "nt":
@@ -165,6 +172,7 @@ def detect_hardware() -> tuple[str, list[str]]:
                 encoding="utf-8",
                 errors="replace",
                 timeout=8,
+                **hidden_subprocess_kwargs(),
             )
             if completed.returncode == 0:
                 gpus = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
@@ -180,6 +188,7 @@ def detect_hardware() -> tuple[str, list[str]]:
                     encoding="utf-8",
                     errors="replace",
                     timeout=8,
+                    **hidden_subprocess_kwargs(),
                 )
                 if completed.returncode == 0:
                     gpus = [

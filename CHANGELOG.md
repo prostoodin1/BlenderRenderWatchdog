@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.2.1 — 2026-07-31
+
+### Background hardware detection
+
+- Prevented the PowerShell/WMIC GPU check from flashing a terminal window every 15 seconds on Windows.
+- Kept hot-plug GPU detection active without changing its polling interval or network-render behavior.
+
 ## 2.2.0 — 2026-07-31
 
 ### Easier multi-device rendering

@@ -3,12 +3,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from blender_render_watchdog import APP_VERSION, build_blender_command, find_last_frame, run_watchdog
+from blender_render_watchdog import APP_VERSION, build_blender_command, find_last_frame, hidden_subprocess_kwargs, run_watchdog
 
 
 class ReleaseVersionTests(unittest.TestCase):
-    def test_release_version_is_220(self) -> None:
-        self.assertEqual(APP_VERSION, "2.2.0")
+    def test_release_version_is_221(self) -> None:
+        self.assertEqual(APP_VERSION, "2.2.1")
+
+
+class BackgroundProcessTests(unittest.TestCase):
+    def test_windows_background_tools_do_not_open_a_console(self) -> None:
+        self.assertEqual(hidden_subprocess_kwargs("nt")["creationflags"], 0x08000000)
+
+    def test_other_platforms_do_not_receive_windows_flags(self) -> None:
+        self.assertEqual(hidden_subprocess_kwargs("posix"), {})
 
 
 class FrameDetectionTests(unittest.TestCase):
