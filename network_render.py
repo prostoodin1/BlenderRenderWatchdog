@@ -235,6 +235,8 @@ class RenderCoordinator:
         port: int = 0,
         advertised_host: str | None = None,
         token: str | None = None,
+        controller_name: str | None = None,
+        controller_hardware: str = "",
         on_event: Callable[[str], None] | None = None,
         on_frame: Callable[[int, Path, float], None] | None = None,
     ) -> None:
@@ -242,6 +244,8 @@ class RenderCoordinator:
         self.port = port
         self.advertised_host = advertised_host or lan_address()
         self.token = token or secrets.token_urlsafe(18)
+        self.controller_name = controller_name or socket.gethostname()
+        self.controller_hardware = controller_hardware
         self.on_event = on_event
         self.on_frame = on_frame
         self.workers: dict[str, WorkerState] = {}
@@ -444,9 +448,30 @@ class RenderCoordinator:
         return True
 
     def status(self) -> dict[str, object]:
+        worker_rows = [worker.public_dict() for worker in self.workers.values()]
+        local_worker = next((worker for worker in worker_rows if worker["name"] == self.controller_name), None)
+        controller_row: dict[str, object] = {
+            "worker_id": "controller",
+            "name": self.controller_name,
+            "hardware": self.controller_hardware,
+            "online": True,
+            "current_frame": None,
+            "completed_frames": 0,
+            "average_seconds": 0.0,
+            "frame_start": None,
+            "frame_end": None,
+            "is_controller": True,
+        }
+        if local_worker is not None:
+            controller_row.update(local_worker)
+            controller_row["worker_id"] = "controller"
+            controller_row["is_controller"] = True
+        devices = [controller_row, *(worker for worker in worker_rows if worker is not local_worker)]
         return {
             "ok": True,
-            "workers": [worker.public_dict() for worker in self.workers.values()],
+            "controller": {"name": self.controller_name, "host": self.advertised_host},
+            "workers": worker_rows,
+            "devices": devices,
             "plan": self.plan.summary() if self.plan else None,
         }
 
@@ -483,6 +508,7 @@ class NetworkWorker:
         self.stop_event = threading.Event()
         self._project_id = ""
         self._project_path: Path | None = None
+        self.status_snapshot: dict[str, object] = {}
 
     @property
     def base_url(self) -> str:
@@ -502,7 +528,16 @@ class NetworkWorker:
             raise ConnectionError(str(result.get("error") or "Connection refused"))
         self.worker_id = str(result["worker_id"])
         self.event(f"[NETWORK] Connected to {self.connection.host}:{self.connection.port}")
+        self.refresh_status()
         return self.worker_id
+
+    def refresh_status(self) -> dict[str, object]:
+        self.status_snapshot = _request_json(
+            self.base_url + "/api/status",
+            self.connection.token,
+            timeout=15,
+        )
+        return dict(self.status_snapshot)
 
     def _download_project(self, plan_id: str, project_name: str) -> Path:
         self.cache_folder.mkdir(parents=True, exist_ok=True)
@@ -532,7 +567,7 @@ class NetworkWorker:
         error = (completed.stdout + completed.stderr)[-2000:]
         return completed.returncode == 0 and output is not None, output, error
 
-    def run(self, poll_seconds: float = 2.0) -> None:
+    def run(self, poll_seconds: float = 2.0, stay_connected: bool = False) -> None:
         if not self.blender.exists():
             raise FileNotFoundError(f"Blender not found: {self.blender}")
         if not self.worker_id:
@@ -561,9 +596,11 @@ class NetworkWorker:
                         result["extension"] = output.suffix.lower()
                         result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
                     _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
-                elif state == "finished":
+                elif state == "finished" and not stay_connected:
                     self.event("[NETWORK] Distributed render is complete")
                     return
+                elif state == "finished":
+                    self.stop_event.wait(poll_seconds)
                 else:
                     self.stop_event.wait(poll_seconds)
                 _request_json(
@@ -572,6 +609,7 @@ class NetworkWorker:
                     {"worker_id": self.worker_id},
                     timeout=15,
                 )
+                self.refresh_status()
             except (OSError, urllib.error.URLError, ConnectionError, json.JSONDecodeError) as error:
                 self.event(f"[NETWORK] Connection error: {error}")
                 self.stop_event.wait(max(2.0, poll_seconds))

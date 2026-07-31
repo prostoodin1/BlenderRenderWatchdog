@@ -45,6 +45,11 @@ class CoordinatorHttpTests(unittest.TestCase):
                 base = f"http://127.0.0.1:{coordinator.port}"
                 joined = _request_json(base + "/api/join", coordinator.token, {"name": "Test", "hardware": "CPU"})
                 worker_id = str(joined["worker_id"])
+                status = _request_json(base + "/api/status", coordinator.token)
+                self.assertEqual(status["controller"]["name"], coordinator.controller_name)
+                self.assertEqual(len(status["devices"]), 2)
+                self.assertTrue(status["devices"][0]["is_controller"])
+                self.assertEqual(status["devices"][1]["name"], "Test")
                 task = _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
                 self.assertEqual(task["frame"], 3)
                 result = _request_json(
@@ -92,6 +97,8 @@ class CoordinatorHttpTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
                 self.assertEqual((root / "renders" / "frame_0001.png").read_bytes(), b"frame-1")
                 self.assertEqual((root / "renders" / "frame_0002.png").read_bytes(), b"frame-2")
+                self.assertIn("devices", worker.status_snapshot)
+                self.assertEqual(worker.status_snapshot["controller"]["host"], "127.0.0.1")
             finally:
                 worker.stop()
                 coordinator.stop()

@@ -63,7 +63,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1865,13 +1865,13 @@ def run_gui(args: argparse.Namespace) -> int:
             nodes_card.columnconfigure(0, weight=1)
             nodes_card.rowconfigure(1, weight=1)
             ttk_module.Label(nodes_card, text="Connected devices", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
-            columns = ("name", "hardware", "current", "done", "average", "range")
+            columns = ("name", "state", "hardware", "current", "done", "average", "range")
             self.network_tree = ttk_module.Treeview(nodes_card, columns=columns, show="headings", style="Queue.Treeview", selectmode="browse")
-            headings = {"name": "Device", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "range": "Allocation"}
-            widths = {"name": 130, "hardware": 240, "current": 60, "done": 60, "average": 75, "range": 100}
+            headings = {"name": "Device", "state": "Status", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "range": "Allocation"}
+            widths = {"name": 150, "state": 75, "hardware": 210, "current": 60, "done": 60, "average": 75, "range": 100}
             for column in columns:
                 self.register_heading(self.network_tree, column, headings[column])
-                self.network_tree.column(column, width=widths[column], anchor="center" if column in {"current", "done", "average", "range"} else "w")
+                self.network_tree.column(column, width=widths[column], anchor="center" if column in {"state", "current", "done", "average", "range"} else "w")
             self.network_tree.grid(row=1, column=0, sticky="nsew")
             allocation = ttk_module.Frame(nodes_card, style="Surface.TFrame")
             allocation.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -2911,6 +2911,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 return
             try:
                 self.network_controller = RenderCoordinator(
+                    controller_name=self.worker_name_var.get().strip() or platform.node(),
+                    controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     on_event=lambda message: self.log_queue.put(message),
                     on_frame=self.on_network_frame,
                 )
@@ -3034,7 +3036,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def run_network_worker(self, worker: NetworkWorker) -> None:
             try:
-                worker.run()
+                worker.run(stay_connected=True)
             except Exception as error:
                 self.log_queue.put(f"[NETWORK] Worker stopped: {error}")
             finally:
@@ -3071,15 +3073,34 @@ def run_gui(args: argparse.Namespace) -> int:
             if hasattr(self, "network_tree"):
                 for item in self.network_tree.get_children():
                     self.network_tree.delete(item)
-                if controller:
-                    for worker in controller.workers.values():
-                        allocation = "Auto" if worker.frame_start is None and worker.frame_end is None else f"{worker.frame_start or '…'}-{worker.frame_end or '…'}"
+                worker = self.network_worker
+                snapshot = controller.status() if controller else (dict(worker.status_snapshot) if worker else {})
+                devices = snapshot.get("devices") or snapshot.get("workers") or []
+                if isinstance(devices, list):
+                    for device in devices:
+                        if not isinstance(device, dict):
+                            continue
+                        start = device.get("frame_start")
+                        end = device.get("frame_end")
+                        allocation = self.tr("Auto") if start is None and end is None else f"{start or '…'}-{end or '…'}"
+                        name = str(device.get("name") or self.tr("Device"))
+                        if device.get("is_controller"):
+                            name = f"{name} · {self.tr('Main')}"
                         self.network_tree.insert(
                             "",
                             "end",
-                            iid=worker.worker_id,
-                            values=(worker.name, worker.hardware, worker.current_frame or "—", worker.completed_frames, format_duration(worker.average_seconds), allocation),
+                            iid=str(device.get("worker_id") or name),
+                            values=(
+                                name,
+                                self.tr("Online") if device.get("online", True) else self.tr("Offline"),
+                                str(device.get("hardware") or "—"),
+                                device.get("current_frame") or "—",
+                                int(device.get("completed_frames") or 0),
+                                format_duration(float(device.get("average_seconds") or 0.0)),
+                                allocation,
+                            ),
                         )
+                if controller:
                     online = sum(time.time() - worker.last_seen < 30 for worker in controller.workers.values())
                     self.set_localized(
                         self.network_status_var,
@@ -3110,6 +3131,25 @@ def run_gui(args: argparse.Namespace) -> int:
                                 failed=summary["failed"],
                             )
                             send_notification("Blender Render Watchdog", "Distributed render finished.")
+                elif worker and snapshot:
+                    controller_info = snapshot.get("controller") or {}
+                    controller_name = str(controller_info.get("name") or worker.connection.host) if isinstance(controller_info, dict) else worker.connection.host
+                    online = sum(bool(device.get("online", True)) for device in devices if isinstance(device, dict)) if isinstance(devices, list) else 0
+                    self.set_localized(
+                        self.network_status_var,
+                        "Connected to {controller} · {online} devices",
+                        controller=controller_name,
+                        online=online,
+                    )
+                    plan = snapshot.get("plan")
+                    if isinstance(plan, dict):
+                        self.animate_progress(float(plan.get("progress") or 0.0))
+                        self.set_localized(
+                            self.progress_text_var,
+                            "{completed} / {total} network frames",
+                            completed=plan.get("completed") or 0,
+                            total=plan.get("total") or 0,
+                        )
             self.refresh_mobile_state_cache()
             try:
                 self.root.after(1000, self.refresh_network_state)

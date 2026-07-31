@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.2 — 2026-07-31
+
+### Shared network visibility
+
+- Added controller identity and a unified device list to the authenticated network status endpoint.
+- Show the main computer and every connected worker on both controller and worker installations.
+- Added online state, current frame, completed frames, average time, allocation and shared progress for connected devices.
+
 ## 2.2.1 — 2026-07-31
 
 ### Background hardware detection
