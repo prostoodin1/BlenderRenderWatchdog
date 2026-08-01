@@ -88,6 +88,8 @@ RUSSIAN_TRANSLATIONS = {
     "Device render settings applied": "Настройки рендера устройства применены",
     "Scene": "Сцена",
     "Frames {start}-{end} · {skipped} existing skipped": "Кадры {start}-{end} · готовых пропущено: {skipped}",
+    "Integrity check requeued frames: {frames}": "Проверка целостности вернула кадры в очередь: {frames}",
+    "{completed} complete · {failed} failed · integrity verified": "Готово: {completed} · ошибок: {failed} · целостность проверена",
     "Create a LAN code and distribute individual frames to up to five PCs.": "Создайте код локальной сети и распределяйте кадры между пятью ПК.",
     "Start controller": "Запустить контроллер",
     "Copy code": "Копировать код",
