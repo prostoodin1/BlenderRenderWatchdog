@@ -15,6 +15,30 @@ class PairingCodeTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_existing_frames_are_skipped_when_resuming(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 4, completed_frames={1, 3})
+        worker = WorkerState("a", "Worker")
+        self.assertEqual(plan.claim(worker).frame, 2)
+        self.assertEqual(plan.summary()["completed"], 2)
+
+    def test_manual_worker_range_never_spills_into_other_frames(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 10)
+        worker = WorkerState("a", "Worker", frame_start=4, frame_end=4)
+        self.assertEqual(plan.claim(worker).frame, 4)
+        plan.complete(worker, 4, True)
+        self.assertIsNone(plan.claim(worker))
+
+    def test_automatic_worker_does_not_take_reserved_manual_frames(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 5)
+        automatic = WorkerState("auto", "Automatic")
+        task = plan.claim(automatic, reserved_ranges=[(1, 3)])
+        self.assertEqual(task.frame, 4)
+
+    def test_stop_marks_unassigned_frames_failed(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 2)
+        plan.stop()
+        self.assertTrue(plan.summary()["finished"])
+
     def test_fast_worker_can_claim_more_frames(self) -> None:
         plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 3)
         worker = WorkerState("a", "Fast")
@@ -45,6 +69,7 @@ class CoordinatorHttpTests(unittest.TestCase):
                 base = f"http://127.0.0.1:{coordinator.port}"
                 joined = _request_json(base + "/api/join", coordinator.token, {"name": "Test", "hardware": "CPU"})
                 worker_id = str(joined["worker_id"])
+                coordinator.set_worker_settings(worker_id, 3, 3, 64)
                 status = _request_json(base + "/api/status", coordinator.token)
                 self.assertEqual(status["controller"]["name"], coordinator.controller_name)
                 self.assertEqual(len(status["devices"]), 2)
@@ -52,6 +77,7 @@ class CoordinatorHttpTests(unittest.TestCase):
                 self.assertEqual(status["devices"][1]["name"], "Test")
                 task = _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
                 self.assertEqual(task["frame"], 3)
+                self.assertEqual(task["samples"], 64)
                 result = _request_json(
                     base + "/api/result",
                     coordinator.token,
