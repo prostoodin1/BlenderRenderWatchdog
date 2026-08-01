@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.0 — 2026-08-01
+
+### Network render controls
+
+- Added Continue missing frames and Manual frame range modes to the main PC.
+- Added an editable main-PC network name and a separate Stop render action.
+- Added per-device Samples, automatic balancing and strict manual allocation controls.
+- Existing output frames are recognized before a resumed job and included in progress.
+
+### Scheduling fixes
+
+- Manual workers no longer leave their assigned range when it is complete.
+- Automatic workers no longer claim frames reserved for manually configured devices.
+- Stopping a network render now finishes active frames while preventing new assignments.
+
 ## 2.2.2 — 2026-07-31
 
 ### Shared network visibility

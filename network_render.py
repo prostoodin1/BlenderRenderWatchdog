@@ -121,6 +121,7 @@ class WorkerState:
     average_seconds: float = 0.0
     frame_start: int | None = None
     frame_end: int | None = None
+    samples: int | None = None
 
     def public_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -140,7 +141,14 @@ class FrameTask:
 
 
 class NetworkRenderPlan:
-    def __init__(self, blend_path: Path, output_folder: Path, start_frame: int, end_frame: int) -> None:
+    def __init__(
+        self,
+        blend_path: Path,
+        output_folder: Path,
+        start_frame: int,
+        end_frame: int,
+        completed_frames: set[int] | None = None,
+    ) -> None:
         if start_frame > end_frame:
             raise ValueError("start_frame cannot be greater than end_frame")
         self.plan_id = uuid.uuid4().hex
@@ -149,12 +157,15 @@ class NetworkRenderPlan:
         self.start_frame = start_frame
         self.end_frame = end_frame
         self.tasks = {frame: FrameTask(frame) for frame in range(start_frame, end_frame + 1)}
+        for frame in completed_frames or set():
+            if frame in self.tasks:
+                self.tasks[frame].status = "completed"
         self.paused = False
         self.stopped = False
         self.created_at = time.time()
         self._lock = threading.RLock()
 
-    def claim(self, worker: WorkerState) -> FrameTask | None:
+    def claim(self, worker: WorkerState, reserved_ranges: list[tuple[int, int]] | None = None) -> FrameTask | None:
         with self._lock:
             if self.paused or self.stopped:
                 return None
@@ -164,8 +175,11 @@ class NetworkRenderPlan:
                 task for task in self.tasks.values()
                 if task.status == "pending" and minimum <= task.frame <= maximum
             ]
-            if not candidates and (worker.frame_start is not None or worker.frame_end is not None):
-                candidates = [task for task in self.tasks.values() if task.status == "pending"]
+            if worker.frame_start is None and worker.frame_end is None and reserved_ranges:
+                candidates = [
+                    task for task in candidates
+                    if not any(start <= task.frame <= end for start, end in reserved_ranges)
+                ]
             if not candidates:
                 return None
             task = min(candidates, key=lambda item: (item.attempts, item.frame))
@@ -176,6 +190,13 @@ class NetworkRenderPlan:
             worker.current_frame = task.frame
             worker.last_seen = time.time()
             return task
+
+    def stop(self) -> None:
+        with self._lock:
+            self.stopped = True
+            for task in self.tasks.values():
+                if task.status == "pending":
+                    task.status = "failed"
 
     def complete(self, worker: WorkerState, frame: int, success: bool, error: str = "") -> FrameTask:
         with self._lock:
@@ -268,7 +289,7 @@ class RenderCoordinator:
         coordinator = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "BlenderRenderWatchdog/2.2"
+            server_version = "BlenderRenderWatchdog/2.3"
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -357,9 +378,16 @@ class RenderCoordinator:
         self._server = None
         self._thread = None
 
-    def start_plan(self, blend_path: Path, output_folder: Path, start_frame: int, end_frame: int) -> NetworkRenderPlan:
+    def start_plan(
+        self,
+        blend_path: Path,
+        output_folder: Path,
+        start_frame: int,
+        end_frame: int,
+        completed_frames: set[int] | None = None,
+    ) -> NetworkRenderPlan:
         output_folder.mkdir(parents=True, exist_ok=True)
-        self.plan = NetworkRenderPlan(blend_path, output_folder, start_frame, end_frame)
+        self.plan = NetworkRenderPlan(blend_path, output_folder, start_frame, end_frame, completed_frames)
         self.event(f"[NETWORK] Distributed render started: {start_frame}-{end_frame}")
         return self.plan
 
@@ -396,7 +424,19 @@ class RenderCoordinator:
             return {"ok": True, "state": "finished", "summary": summary}
         if plan.paused:
             return {"ok": True, "state": "paused", "summary": summary}
-        task = plan.claim(worker)
+        reserved_ranges = [
+            (
+                other.frame_start if other.frame_start is not None else plan.start_frame,
+                other.frame_end if other.frame_end is not None else plan.end_frame,
+            )
+            for other in self.workers.values()
+            if (
+                other.worker_id != worker_id
+                and time.time() - other.last_seen < 30
+                and (other.frame_start is not None or other.frame_end is not None)
+            )
+        ]
+        task = plan.claim(worker, reserved_ranges)
         if task is None:
             return {"ok": True, "state": "waiting", "summary": summary}
         return {
@@ -405,6 +445,7 @@ class RenderCoordinator:
             "frame": task.frame,
             "plan_id": plan.plan_id,
             "project_name": plan.blend_path.name,
+            "samples": worker.samples,
         }
 
     def accept_result(self, data: dict[str, object]) -> dict[str, object]:
@@ -437,15 +478,27 @@ class RenderCoordinator:
             self.event(f"[NETWORK] Frame {frame} failed on {worker.name}; retry scheduled")
         return {"ok": True, "state": task.status, "summary": plan.summary()}
 
-    def set_worker_range(self, worker_id: str, start_frame: int | None, end_frame: int | None) -> bool:
+    def set_worker_settings(
+        self,
+        worker_id: str,
+        start_frame: int | None,
+        end_frame: int | None,
+        samples: int | None,
+    ) -> bool:
         worker = self.workers.get(worker_id)
         if worker is None:
             return False
         if start_frame is not None and end_frame is not None and start_frame > end_frame:
             raise ValueError("start_frame cannot be greater than end_frame")
+        if samples is not None and samples < 1:
+            raise ValueError("samples must be greater than 0")
         worker.frame_start = start_frame
         worker.frame_end = end_frame
+        worker.samples = samples
         return True
+
+    def set_worker_range(self, worker_id: str, start_frame: int | None, end_frame: int | None) -> bool:
+        return self.set_worker_settings(worker_id, start_frame, end_frame, self.workers.get(worker_id).samples if worker_id in self.workers else None)
 
     def status(self) -> dict[str, object]:
         worker_rows = [worker.public_dict() for worker in self.workers.values()]
@@ -460,10 +513,13 @@ class RenderCoordinator:
             "average_seconds": 0.0,
             "frame_start": None,
             "frame_end": None,
+            "samples": None,
             "is_controller": True,
+            "settings_worker_id": "",
         }
         if local_worker is not None:
             controller_row.update(local_worker)
+            controller_row["settings_worker_id"] = local_worker["worker_id"]
             controller_row["worker_id"] = "controller"
             controller_row["is_controller"] = True
         devices = [controller_row, *(worker for worker in worker_rows if worker is not local_worker)]
@@ -557,10 +613,13 @@ class NetworkWorker:
         self._project_path = destination
         return destination
 
-    def _render_frame(self, frame: int, project: Path) -> tuple[bool, Path | None, str]:
+    def _render_frame(self, frame: int, project: Path, samples: int | None = None) -> tuple[bool, Path | None, str]:
         frame_folder = self.cache_folder / "frames" / uuid.uuid4().hex
         frame_folder.mkdir(parents=True, exist_ok=True)
-        command = [str(self.blender), "-b", str(project), "-o", str(frame_folder / "frame_####"), "-f", str(frame)]
+        command = [str(self.blender), "-b", str(project), "-o", str(frame_folder / "frame_####")]
+        if samples is not None:
+            command.extend(["--python-expr", f"import bpy; bpy.context.scene.cycles.samples={samples}"])
+        command.extend(["-f", str(frame)])
         completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
         candidates = [path for path in frame_folder.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
         output = max(candidates, key=lambda path: path.stat().st_mtime, default=None)
@@ -583,9 +642,12 @@ class NetworkWorker:
                         self.event("[NETWORK] Downloading project...")
                         self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
                     frame = int(task["frame"])
+                    samples = int(task["samples"]) if task.get("samples") is not None else None
                     self.event(f"[NETWORK] Rendering frame {frame}")
-                    renderer = self.render_frame or self._render_frame
-                    success, output, error = renderer(frame, self._project_path)
+                    if self.render_frame:
+                        success, output, error = self.render_frame(frame, self._project_path)
+                    else:
+                        success, output, error = self._render_frame(frame, self._project_path, samples)
                     result: dict[str, object] = {
                         "worker_id": self.worker_id,
                         "frame": frame,

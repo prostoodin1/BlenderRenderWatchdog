@@ -63,7 +63,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.3.0"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1365,11 +1365,17 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_join_code_var = tk.StringVar(value="")
             self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
             self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
+            self.network_range_mode_var = tk.StringVar(value=self.config.get("network_range_mode", "resume"))
+            self.network_range_mode_label_var = tk.StringVar()
+            self.controller_name_var = tk.StringVar(value=self.config.get("network_controller_name", platform.node() or "Main PC"))
+            self.network_manual_start_var = tk.StringVar(value=self.config.get("network_manual_start", ""))
+            self.network_manual_end_var = tk.StringVar(value=self.config.get("network_manual_end", ""))
             self.network_status_var = tk.StringVar()
             self.worker_name_var = tk.StringVar(value=platform.node() or self.tr("Render worker"))
             self.set_localized(self.network_status_var, "Controller is stopped")
             self.worker_range_start_var = tk.StringVar(value="")
             self.worker_range_end_var = tk.StringVar(value="")
+            self.worker_samples_var = tk.StringVar(value="")
             self.sandbox_frame_var = tk.StringVar(value="1")
             self.sandbox_parallel_var = tk.BooleanVar(value=False)
             self.sandbox_status_var = tk.StringVar()
@@ -1831,21 +1837,43 @@ def run_gui(args: argparse.Namespace) -> int:
             controller_card.columnconfigure(0, weight=1)
             ttk_module.Label(controller_card, text="Main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(controller_card, text="Create a LAN code and distribute individual frames to up to five PCs.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
-            ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=2, column=0, sticky="ew")
+            ttk_module.Label(controller_card, text="Main PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
+            ttk_module.Entry(controller_card, textvariable=self.controller_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
+            ttk_module.Label(controller_card, text="Connection code", style="Field.TLabel").grid(row=4, column=0, sticky="w")
+            ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=5, column=0, sticky="ew", pady=(4, 0))
             controller_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            controller_actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            controller_actions.grid(row=6, column=0, sticky="ew", pady=(12, 0))
             ttk_module.Button(controller_actions, text="Start controller", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0)
             ttk_module.Button(controller_actions, text="Copy code", command=self.copy_network_code).grid(row=0, column=1, padx=(8, 0))
-            ttk_module.Button(controller_actions, text="Stop", command=self.stop_network_controller).grid(row=0, column=2, padx=(8, 0))
+            ttk_module.Button(controller_actions, text="Stop controller", command=self.stop_network_controller).grid(row=0, column=2, padx=(8, 0))
             ttk_module.Checkbutton(
                 controller_card,
                 text="Use this computer for rendering",
                 variable=self.network_use_local_var,
                 command=self.save_current_config,
                 style="Modern.TCheckbutton",
-            ).grid(row=4, column=0, sticky="w", pady=(10, 0))
-            ttk_module.Button(controller_card, text="Start render", style="Primary.TButton", command=self.start_network_render).grid(row=5, column=0, sticky="ew", pady=(10, 0))
-            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=6, column=0, sticky="w", pady=(10, 0))
+            ).grid(row=7, column=0, sticky="w", pady=(10, 0))
+            range_mode = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            range_mode.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+            range_mode.columnconfigure(0, weight=1)
+            range_mode.columnconfigure(1, weight=1)
+            ttk_module.Button(range_mode, text="Continue missing frames", command=lambda: self.set_network_range_mode("resume")).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            ttk_module.Button(range_mode, text="Manual frame range", command=lambda: self.set_network_range_mode("manual")).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            ttk_module.Label(range_mode, textvariable=self.network_range_mode_label_var, style="CardHint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            manual_range = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            manual_range.grid(row=9, column=0, sticky="ew", pady=(8, 0))
+            ttk_module.Label(manual_range, text="from", style="Field.TLabel").grid(row=0, column=0)
+            ttk_module.Entry(manual_range, textvariable=self.network_manual_start_var, width=9).grid(row=0, column=1, padx=(6, 10))
+            ttk_module.Label(manual_range, text="to", style="Field.TLabel").grid(row=0, column=2)
+            ttk_module.Entry(manual_range, textvariable=self.network_manual_end_var, width=9).grid(row=0, column=3, padx=(6, 0))
+            self.network_manual_range_frame = manual_range
+            render_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            render_actions.grid(row=10, column=0, sticky="ew", pady=(10, 0))
+            render_actions.columnconfigure(0, weight=1)
+            render_actions.columnconfigure(1, weight=1)
+            ttk_module.Button(render_actions, text="Start render", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            ttk_module.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=11, column=0, sticky="w", pady=(10, 0))
 
             worker_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
             self.network_worker_card = worker_card._glass_shell
@@ -1865,14 +1893,15 @@ def run_gui(args: argparse.Namespace) -> int:
             nodes_card.columnconfigure(0, weight=1)
             nodes_card.rowconfigure(1, weight=1)
             ttk_module.Label(nodes_card, text="Connected devices", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
-            columns = ("name", "state", "hardware", "current", "done", "average", "range")
+            columns = ("name", "state", "hardware", "current", "done", "average", "samples", "range")
             self.network_tree = ttk_module.Treeview(nodes_card, columns=columns, show="headings", style="Queue.Treeview", selectmode="browse")
-            headings = {"name": "Device", "state": "Status", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "range": "Allocation"}
-            widths = {"name": 150, "state": 75, "hardware": 210, "current": 60, "done": 60, "average": 75, "range": 100}
+            headings = {"name": "Device", "state": "Status", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "samples": "Samples", "range": "Allocation"}
+            widths = {"name": 140, "state": 70, "hardware": 180, "current": 55, "done": 55, "average": 70, "samples": 70, "range": 95}
             for column in columns:
                 self.register_heading(self.network_tree, column, headings[column])
-                self.network_tree.column(column, width=widths[column], anchor="center" if column in {"state", "current", "done", "average", "range"} else "w")
+                self.network_tree.column(column, width=widths[column], anchor="center" if column in {"state", "current", "done", "average", "samples", "range"} else "w")
             self.network_tree.grid(row=1, column=0, sticky="nsew")
+            self.network_tree.bind("<<TreeviewSelect>>", self.on_network_device_selected)
             allocation = ttk_module.Frame(nodes_card, style="Surface.TFrame")
             allocation.grid(row=2, column=0, sticky="ew", pady=(12, 0))
             ttk_module.Label(allocation, text="Manual allocation", style="Field.TLabel").grid(row=0, column=0, sticky="w")
@@ -1881,7 +1910,12 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Entry(allocation, textvariable=self.worker_range_end_var, width=9).grid(row=0, column=3, padx=(4, 10))
             ttk_module.Button(allocation, text="Apply", command=self.apply_network_allocation).grid(row=0, column=4)
             ttk_module.Label(allocation, text="Leave empty for automatic balancing", style="CardHint.TLabel").grid(row=0, column=5, sticky="w", padx=(10, 0))
+            ttk_module.Label(allocation, text="Samples", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+            ttk_module.Entry(allocation, textvariable=self.worker_samples_var, width=9).grid(row=1, column=1, padx=(10, 4), pady=(8, 0))
+            ttk_module.Button(allocation, text="Automatic frames", command=self.set_selected_worker_auto).grid(row=1, column=2, columnspan=2, pady=(8, 0))
+            ttk_module.Label(allocation, text="Empty Samples uses the scene setting", style="CardHint.TLabel").grid(row=1, column=4, columnspan=2, sticky="w", padx=(10, 0), pady=(8, 0))
             self.root.after_idle(self.update_network_role_view)
+            self.root.after_idle(self.update_network_range_mode_view)
 
         def build_insights_tab(self, parent, ttk_module) -> None:
             parent.columnconfigure(0, weight=1)
@@ -2505,6 +2539,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.language_var,
                 self.network_role_var,
                 self.network_use_local_var,
+                self.controller_name_var,
+                self.network_range_mode_var,
+                self.network_manual_start_var,
+                self.network_manual_end_var,
             ]
             for variable in variables:
                 variable.trace_add("write", lambda *_: self.schedule_config_save())
@@ -2552,6 +2590,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     "language": self.language_code,
                     "network_role": self.network_role_var.get(),
                     "network_use_local": "1" if self.network_use_local_var.get() else "0",
+                    "network_controller_name": self.controller_name_var.get().strip(),
+                    "network_range_mode": self.network_range_mode_var.get(),
+                    "network_manual_start": self.network_manual_start_var.get().strip(),
+                    "network_manual_end": self.network_manual_end_var.get().strip(),
                 }
             )
 
@@ -2905,13 +2947,28 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_controller_card.grid_remove()
                 self.network_worker_card.grid()
 
+        def set_network_range_mode(self, mode: str) -> None:
+            self.network_range_mode_var.set("manual" if mode == "manual" else "resume")
+            self.update_network_range_mode_view()
+            self.save_current_config()
+
+        def update_network_range_mode_view(self) -> None:
+            if self.network_range_mode_var.get() == "manual":
+                self.set_localized(self.network_range_mode_label_var, "Manual frame range selected")
+                if hasattr(self, "network_manual_range_frame"):
+                    self.network_manual_range_frame.grid()
+            else:
+                self.set_localized(self.network_range_mode_label_var, "Continue: skip frames already in the output folder")
+                if hasattr(self, "network_manual_range_frame"):
+                    self.network_manual_range_frame.grid_remove()
+
         def start_network_controller(self) -> None:
             if self.network_controller is not None:
                 self.network_code_var.set(self.network_controller.pairing_code)
                 return
             try:
                 self.network_controller = RenderCoordinator(
-                    controller_name=self.worker_name_var.get().strip() or platform.node(),
+                    controller_name=self.controller_name_var.get().strip() or platform.node(),
                     controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     on_event=lambda message: self.log_queue.put(message),
                     on_frame=self.on_network_frame,
@@ -2931,11 +2988,20 @@ def run_gui(args: argparse.Namespace) -> int:
         def stop_network_controller(self) -> None:
             if self.network_controller:
                 if self.network_controller.plan:
-                    self.network_controller.plan.stopped = True
+                    self.network_controller.plan.stop()
                 self.network_controller.stop()
             self.network_controller = None
             self.network_code_var.set("")
             self.set_localized(self.network_status_var, "Controller is stopped")
+
+        def stop_network_render(self) -> None:
+            if not self.network_controller or not self.network_controller.plan:
+                self.set_localized(self.network_status_var, "No network render is running")
+                return
+            self.network_controller.plan.stop()
+            self.set_localized(self.network_status_var, "Network render stopped; active frames may finish")
+            self.set_localized(self.status_var, "Stopped")
+            self.set_localized(self.status_detail_var, "No new network frames will be assigned")
 
         def copy_network_code(self) -> None:
             code = self.network_code_var.get().strip()
@@ -2954,26 +3020,40 @@ def run_gui(args: argparse.Namespace) -> int:
                 return
             if self.network_use_local_var.get() and self.network_worker is None:
                 self.network_join_code_var.set(self.network_controller.pairing_code)
-                self.start_network_worker(confirm=False)
+                self.start_network_worker(confirm=False, name_override=self.controller_name_var.get().strip())
             blender, blend, manual_output = paths
-            frame_range = self.frame_range_values()
-            if frame_range is None:
-                return
             settings = query_scene_settings(blender, blend, log=lambda message: self.log(message)) or {}
-            start = frame_range[0] if frame_range[0] is not None else int(settings.get("frame_start") or 1)
-            end = frame_range[1] if frame_range[1] is not None else int(settings.get("frame_end") or start)
             output = (
                 output_folder_from_scene_path(str(settings.get("output_path") or ""), blend)
                 if self.use_scene_output_var.get()
                 else manual_output
             )
+            scene_start = int(settings.get("frame_start") or 1)
+            scene_end = int(settings.get("frame_end") or scene_start)
+            completed_frames: set[int] = set()
+            if self.network_range_mode_var.get() == "manual":
+                start = self.parse_optional_frame(self.network_manual_start_var.get(), "Start frame")
+                end = self.parse_optional_frame(self.network_manual_end_var.get(), "End frame")
+                if start is None or end is None:
+                    messagebox.showerror(self.tr("Invalid frame range"), self.tr("Enter both Start frame and End frame for manual network rendering."))
+                    return
+                if start > end:
+                    messagebox.showerror(self.tr("Invalid frame range"), self.tr("Start frame cannot be greater than End frame."))
+                    return
+            else:
+                start, end = scene_start, scene_end
+                completed_frames = {
+                    frame
+                    for path in rendered_frame_files(output).values()
+                    if (frame := frame_number_from_path(path)) is not None and start <= frame <= end
+                }
             self.set_localized(self.status_var, "Network setup")
             self.set_localized(self.status_detail_var, "Packing project assets for workers")
             self.set_localized(self.network_status_var, "Preparing a packed project copy…")
             controller = self.network_controller
             threading.Thread(
                 target=self.prepare_network_plan_worker,
-                args=(controller, blender, blend, output, start, end, settings),
+                args=(controller, blender, blend, output, start, end, settings, completed_frames),
                 daemon=True,
             ).start()
 
@@ -2986,6 +3066,7 @@ def run_gui(args: argparse.Namespace) -> int:
             start: int,
             end: int,
             settings: dict[str, object],
+            completed_frames: set[int],
         ) -> None:
             try:
                 stamp = int(blend.stat().st_mtime)
@@ -2993,10 +3074,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 prepare_network_project(blender, blend, packed, log=lambda message: self.log_queue.put(message))
                 if self.network_controller is not controller:
                     return
-                controller.start_plan(packed, output, start, end)
+                controller.start_plan(packed, output, start, end, completed_frames)
                 self.network_session = RenderSession(str(blend), str(output), start, end, mode="network", settings=settings)
                 self.network_history_saved = False
-                self.log_queue.put(("__NETWORK_STARTED__", start, end))
+                self.log_queue.put(("__NETWORK_STARTED__", start, end, len(completed_frames)))
             except Exception as error:
                 self.log_queue.put(("__NETWORK_ERROR__", str(error), ""))
 
@@ -3006,7 +3087,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_session.mark_frame(frame)
             self.log_queue.put(("__NETWORK_FRAME__", frame, str(path)))
 
-        def start_network_worker(self, confirm: bool = True) -> None:
+        def start_network_worker(self, confirm: bool = True, name_override: str | None = None) -> None:
             if self.network_worker is not None:
                 return
             code = self.network_join_code_var.get().strip()
@@ -3023,7 +3104,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_worker = NetworkWorker(
                     code,
                     blender,
-                    name=self.worker_name_var.get().strip() or platform.node(),
+                    name=name_override or self.worker_name_var.get().strip() or platform.node(),
                     hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     cache_folder=app_config_dir() / "network_worker",
                     on_event=lambda message: self.log_queue.put(message),
@@ -3048,7 +3129,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.start_network_controller()
             if self.network_controller:
                 self.network_join_code_var.set(self.network_controller.pairing_code)
-                self.start_network_worker()
+                self.start_network_worker(name_override=self.controller_name_var.get().strip())
 
         def stop_network_worker(self) -> None:
             if self.network_worker:
@@ -3064,16 +3145,39 @@ def run_gui(args: argparse.Namespace) -> int:
             try:
                 start = int(self.worker_range_start_var.get()) if self.worker_range_start_var.get().strip() else None
                 end = int(self.worker_range_end_var.get()) if self.worker_range_end_var.get().strip() else None
-                self.network_controller.set_worker_range(str(selection[0]), start, end)
+                samples = int(self.worker_samples_var.get()) if self.worker_samples_var.get().strip() else None
+                worker_id = self.network_device_worker_ids.get(str(selection[0]), "")
+                if not worker_id or not self.network_controller.set_worker_settings(worker_id, start, end, samples):
+                    messagebox.showerror(self.tr("Allocation"), self.tr("This device is not available for render settings."))
+                    return
+                self.set_localized(self.network_status_var, "Device render settings applied")
             except ValueError as error:
                 messagebox.showerror(self.tr("Allocation"), str(error))
+
+        def set_selected_worker_auto(self) -> None:
+            self.worker_range_start_var.set("")
+            self.worker_range_end_var.set("")
+            self.apply_network_allocation()
+
+        def on_network_device_selected(self, _event=None) -> None:
+            selection = self.network_tree.selection()
+            if not selection:
+                return
+            device = self.network_device_rows.get(str(selection[0]), {})
+            self.worker_range_start_var.set("" if device.get("frame_start") is None else str(device["frame_start"]))
+            self.worker_range_end_var.set("" if device.get("frame_end") is None else str(device["frame_end"]))
+            self.worker_samples_var.set("" if device.get("samples") is None else str(device["samples"]))
 
         def refresh_network_state(self) -> None:
             controller = self.network_controller
             if hasattr(self, "network_tree"):
+                self.network_device_worker_ids: dict[str, str] = {}
+                self.network_device_rows: dict[str, dict[str, object]] = {}
                 for item in self.network_tree.get_children():
                     self.network_tree.delete(item)
                 worker = self.network_worker
+                if controller:
+                    controller.controller_name = self.controller_name_var.get().strip() or platform.node()
                 snapshot = controller.status() if controller else (dict(worker.status_snapshot) if worker else {})
                 devices = snapshot.get("devices") or snapshot.get("workers") or []
                 if isinstance(devices, list):
@@ -3086,10 +3190,13 @@ def run_gui(args: argparse.Namespace) -> int:
                         name = str(device.get("name") or self.tr("Device"))
                         if device.get("is_controller"):
                             name = f"{name} · {self.tr('Main')}"
+                        item_id = str(device.get("worker_id") or name)
+                        self.network_device_worker_ids[item_id] = str(device.get("settings_worker_id") or device.get("worker_id") or "")
+                        self.network_device_rows[item_id] = device
                         self.network_tree.insert(
                             "",
                             "end",
-                            iid=str(device.get("worker_id") or name),
+                            iid=item_id,
                             values=(
                                 name,
                                 self.tr("Online") if device.get("online", True) else self.tr("Offline"),
@@ -3097,6 +3204,7 @@ def run_gui(args: argparse.Namespace) -> int:
                                 device.get("current_frame") or "—",
                                 int(device.get("completed_frames") or 0),
                                 format_duration(float(device.get("average_seconds") or 0.0)),
+                                device.get("samples") or self.tr("Scene"),
                                 allocation,
                             ),
                         )
@@ -3217,7 +3325,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.pause_watchdog()
             elif action == "stop":
                 if self.network_controller and self.network_controller.plan:
-                    self.network_controller.plan.stopped = True
+                    self.network_controller.plan.stop()
                 self.stop_watchdog()
             elif action == "shutdown":
                 self.shutdown_after_render_var.set(True)
@@ -3681,11 +3789,15 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.latest_frame_path = Path(str(message[2]))
                     continue
 
-                if isinstance(message, tuple) and len(message) == 3 and message[0] == "__NETWORK_STARTED__":
+                if isinstance(message, tuple) and len(message) >= 3 and message[0] == "__NETWORK_STARTED__":
                     start = int(message[1])
                     end = int(message[2])
+                    skipped = int(message[3]) if len(message) > 3 else 0
                     self.set_localized(self.status_var, "Network render")
-                    self.set_localized(self.status_detail_var, "Distributing frames {start}-{end}", start=start, end=end)
+                    if skipped:
+                        self.set_localized(self.status_detail_var, "Frames {start}-{end} · {skipped} existing skipped", start=start, end=end, skipped=skipped)
+                    else:
+                        self.set_localized(self.status_detail_var, "Distributing frames {start}-{end}", start=start, end=end)
                     self.set_localized(self.network_status_var, "Distributed render is running")
                     if self.network_controller and not self.network_controller.workers:
                         self.log("[NETWORK] No workers yet. Connect a device or choose Use this PC.")
