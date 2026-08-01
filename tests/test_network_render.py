@@ -8,6 +8,9 @@ from pathlib import Path
 from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json
 
 
+VALID_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+
+
 class PairingCodeTests(unittest.TestCase):
     def test_round_trip(self) -> None:
         original = PairingCode("192.168.1.5", 8765, "secret")
@@ -86,11 +89,11 @@ class CoordinatorHttpTests(unittest.TestCase):
                         "frame": 3,
                         "success": True,
                         "extension": ".png",
-                        "file_base64": base64.b64encode(b"png").decode("ascii"),
+                        "file_base64": base64.b64encode(VALID_PNG).decode("ascii"),
                     },
                 )
                 self.assertEqual(result["state"], "completed")
-                self.assertEqual((root / "renders" / "frame_0003.png").read_bytes(), b"png")
+                self.assertEqual((root / "renders" / "frame_0003.png").read_bytes(), VALID_PNG)
             finally:
                 coordinator.stop()
 
@@ -107,7 +110,7 @@ class CoordinatorHttpTests(unittest.TestCase):
 
             def render(frame, _project):
                 output = root / f"worker_{frame}.png"
-                output.write_bytes(f"frame-{frame}".encode())
+                output.write_bytes(VALID_PNG)
                 return True, output, ""
 
             worker = NetworkWorker(
@@ -121,12 +124,58 @@ class CoordinatorHttpTests(unittest.TestCase):
             thread.join(timeout=5)
             try:
                 self.assertFalse(thread.is_alive())
-                self.assertEqual((root / "renders" / "frame_0001.png").read_bytes(), b"frame-1")
-                self.assertEqual((root / "renders" / "frame_0002.png").read_bytes(), b"frame-2")
+                self.assertEqual((root / "renders" / "frame_0001.png").read_bytes(), VALID_PNG)
+                self.assertEqual((root / "renders" / "frame_0002.png").read_bytes(), VALID_PNG)
                 self.assertIn("devices", worker.status_snapshot)
                 self.assertEqual(worker.status_snapshot["controller"]["host"], "127.0.0.1")
             finally:
                 worker.stop()
+                coordinator.stop()
+
+    def test_corrupt_final_frame_is_quarantined_and_requeued(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blend = root / "scene.blend"
+            blend.write_bytes(b"blend")
+            coordinator = RenderCoordinator(bind_host="127.0.0.1", advertised_host="127.0.0.1")
+            coordinator.start()
+            try:
+                coordinator.start_plan(blend, root / "renders", 1, 1)
+                base = f"http://127.0.0.1:{coordinator.port}"
+                joined = _request_json(base + "/api/join", coordinator.token, {"name": "Test", "hardware": "CPU"})
+                worker_id = str(joined["worker_id"])
+                _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
+                result = _request_json(
+                    base + "/api/result",
+                    coordinator.token,
+                    {
+                        "worker_id": worker_id,
+                        "frame": 1,
+                        "success": True,
+                        "extension": ".png",
+                        "file_base64": base64.b64encode(b"broken").decode("ascii"),
+                    },
+                )
+                self.assertEqual(result["summary"]["pending"], 1)
+                self.assertEqual(result["summary"]["integrity_retries"], 1)
+                self.assertTrue(list((root / "renders").glob("*.corrupt-*")))
+                retry = _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
+                self.assertEqual(retry["frame"], 1)
+                repaired = _request_json(
+                    base + "/api/result",
+                    coordinator.token,
+                    {
+                        "worker_id": worker_id,
+                        "frame": 1,
+                        "success": True,
+                        "extension": ".png",
+                        "file_base64": base64.b64encode(VALID_PNG).decode("ascii"),
+                    },
+                )
+                self.assertTrue(repaired["summary"]["finished"])
+                self.assertTrue(repaired["summary"]["integrity_audited"])
+                self.assertEqual(repaired["summary"]["integrity_retries"], 1)
+            finally:
                 coordinator.stop()
 
 

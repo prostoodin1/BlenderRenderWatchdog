@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.3.1 — 2026-08-01
+
+### Final frame integrity audit
+
+- Added a main-PC integrity pass after every distributed render finishes.
+- Quarantine corrupt output files and automatically requeue their frame numbers.
+- Validate PNG checksums and structure, plus signatures and truncation markers for other Blender image formats.
+- Delay successful network completion until all replacement frames pass validation.
+
 ## 2.3.0 — 2026-08-01
 
 ### Network render controls

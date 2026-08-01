@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from frame_validation import validate_frame
+
 
 MAX_WORKERS = 5
 IMAGE_EXTENSIONS = {".bmp", ".exr", ".hdr", ".jpeg", ".jpg", ".png", ".tga", ".tif", ".tiff", ".webp"}
@@ -163,6 +165,9 @@ class NetworkRenderPlan:
         self.paused = False
         self.stopped = False
         self.created_at = time.time()
+        self.integrity_retries = 0
+        self.last_corrupt_frames: list[int] = []
+        self.integrity_audited = False
         self._lock = threading.RLock()
 
     def claim(self, worker: WorkerState, reserved_ranges: list[tuple[int, int]] | None = None) -> FrameTask | None:
@@ -244,6 +249,9 @@ class NetworkRenderPlan:
                     "paused": self.paused,
                     "stopped": self.stopped,
                     "finished": counts["completed"] + counts["failed"] == total,
+                    "integrity_retries": self.integrity_retries,
+                    "corrupt_frames": list(self.last_corrupt_frames),
+                    "integrity_audited": self.integrity_audited,
                 }
             )
             return counts
@@ -274,6 +282,7 @@ class RenderCoordinator:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        self._integrity_lock = threading.RLock()
 
     @property
     def pairing_code(self) -> str:
@@ -420,6 +429,9 @@ class RenderCoordinator:
             return {"ok": True, "state": "idle"}
         plan.release_stale(self.workers)
         summary = plan.summary()
+        if summary["finished"] and int(summary["failed"]) == 0 and not plan.integrity_audited:
+            self.audit_completed_outputs(plan)
+            summary = plan.summary()
         if summary["finished"]:
             return {"ok": True, "state": "finished", "summary": summary}
         if plan.paused:
@@ -476,7 +488,51 @@ class RenderCoordinator:
                 self.on_frame(frame, output_path, task.duration_seconds)
         else:
             self.event(f"[NETWORK] Frame {frame} failed on {worker.name}; retry scheduled")
+        summary = plan.summary()
+        if summary["finished"] and int(summary["failed"]) == 0 and not plan.integrity_audited:
+            self.audit_completed_outputs(plan)
         return {"ok": True, "state": task.status, "summary": plan.summary()}
+
+    def audit_completed_outputs(self, plan: NetworkRenderPlan) -> list[int]:
+        """Verify every final frame and requeue corrupt outputs for another worker."""
+        with self._integrity_lock:
+            if self.plan is not plan:
+                return []
+            corrupt: list[int] = []
+            for frame, task in plan.tasks.items():
+                if task.status != "completed":
+                    continue
+                candidates = sorted(
+                    (
+                        path for path in plan.output_folder.glob(f"frame_{frame:04d}.*")
+                        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+                    ),
+                    key=lambda path: path.stat().st_mtime,
+                    reverse=True,
+                )
+                output = candidates[0] if candidates else None
+                valid, reason = validate_frame(output) if output else (False, "frame file is missing")
+                if valid:
+                    continue
+                if output is not None:
+                    quarantine = output.with_name(f"{output.name}.corrupt-{int(time.time())}-{uuid.uuid4().hex[:6]}")
+                    try:
+                        output.replace(quarantine)
+                    except OSError:
+                        pass
+                task.error = f"Integrity check failed: {reason}"
+                task.worker_id = ""
+                task.status = "pending" if task.attempts < 3 and not plan.stopped else "failed"
+                plan.integrity_retries += 1
+                corrupt.append(frame)
+            plan.last_corrupt_frames = corrupt
+            if corrupt:
+                plan.integrity_audited = False
+                self.event(f"[NETWORK] Integrity check requeued corrupt frames: {', '.join(map(str, corrupt))}")
+            else:
+                plan.integrity_audited = True
+                self.event("[NETWORK] Integrity check passed for all completed frames")
+            return corrupt
 
     def set_worker_settings(
         self,

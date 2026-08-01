@@ -63,7 +63,7 @@ CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -3218,6 +3218,13 @@ def run_gui(args: argparse.Namespace) -> int:
                     )
                     if controller.plan:
                         summary = controller.plan.summary()
+                        corrupt_frames = summary.get("corrupt_frames") or []
+                        if corrupt_frames and not summary["finished"]:
+                            self.set_localized(
+                                self.network_status_var,
+                                "Integrity check requeued frames: {frames}",
+                                frames=", ".join(str(frame) for frame in corrupt_frames),
+                            )
                         self.animate_progress(float(summary["progress"]))
                         self.set_localized(
                             self.progress_text_var,
@@ -3232,9 +3239,14 @@ def run_gui(args: argparse.Namespace) -> int:
                             self.refresh_history_views()
                             self.network_history_saved = True
                             self.set_localized(self.status_var, "Network complete")
+                            detail = (
+                                "{completed} complete · {failed} failed · integrity verified"
+                                if summary.get("integrity_audited")
+                                else "{completed} complete · {failed} failed"
+                            )
                             self.set_localized(
                                 self.status_detail_var,
-                                "{completed} complete · {failed} failed",
+                                detail,
                                 completed=summary["completed"],
                                 failed=summary["failed"],
                             )
