@@ -233,6 +233,18 @@ class NetworkRenderPlan:
                     released.append(task.frame)
             return released
 
+    def release_worker(self, worker_id: str) -> list[int]:
+        """Immediately return a disconnected worker's active frames to the queue."""
+        released: list[int] = []
+        with self._lock:
+            for task in self.tasks.values():
+                if task.status == "running" and task.worker_id == worker_id:
+                    task.status = "pending"
+                    task.worker_id = ""
+                    task.error = "Worker disconnected by controller"
+                    released.append(task.frame)
+        return released
+
     def summary(self) -> dict[str, object]:
         with self._lock:
             counts = {status: 0 for status in ("pending", "running", "completed", "failed")}
@@ -298,7 +310,7 @@ class RenderCoordinator:
         coordinator = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "BlenderRenderWatchdog/2.3"
+            server_version = "BlenderRenderWatchdog/2.4"
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -413,7 +425,7 @@ class RenderCoordinator:
     def heartbeat(self, worker_id: str) -> dict[str, object]:
         worker = self.workers.get(worker_id)
         if worker is None:
-            return {"ok": False, "error": "Unknown worker"}
+            return {"ok": False, "state": "disconnected", "error": "Disconnected by controller"}
         worker.last_seen = time.time()
         if self.plan:
             self.plan.release_stale(self.workers)
@@ -422,7 +434,7 @@ class RenderCoordinator:
     def claim_task(self, worker_id: str) -> dict[str, object]:
         worker = self.workers.get(worker_id)
         if worker is None:
-            return {"ok": False, "error": "Unknown worker"}
+            return {"ok": False, "state": "disconnected", "error": "Disconnected by controller"}
         worker.last_seen = time.time()
         plan = self.plan
         if plan is None:
@@ -555,6 +567,17 @@ class RenderCoordinator:
 
     def set_worker_range(self, worker_id: str, start_frame: int | None, end_frame: int | None) -> bool:
         return self.set_worker_settings(worker_id, start_frame, end_frame, self.workers.get(worker_id).samples if worker_id in self.workers else None)
+
+    def disconnect_worker(self, worker_id: str) -> bool:
+        with self._lock:
+            worker = self.workers.pop(worker_id, None)
+            if worker is None:
+                return False
+            released = self.plan.release_worker(worker_id) if self.plan else []
+            worker.current_frame = None
+        suffix = f"; requeued frames: {', '.join(map(str, released))}" if released else ""
+        self.event(f"[NETWORK] Disconnected by controller: {worker.name}{suffix}")
+        return True
 
     def status(self) -> dict[str, object]:
         worker_rows = [worker.public_dict() for worker in self.workers.values()]
@@ -692,6 +715,9 @@ class NetworkWorker:
                 query = urllib.parse.urlencode({"worker_id": self.worker_id})
                 task = _request_json(self.base_url + f"/api/task?{query}", self.connection.token, timeout=45)
                 state = str(task.get("state") or "")
+                if not task.get("ok") and state == "disconnected":
+                    self.event("[NETWORK] Disconnected by the main computer")
+                    return
                 if state == "task":
                     plan_id = str(task["plan_id"])
                     if self._project_id != plan_id or self._project_path is None or not self._project_path.exists():
@@ -721,12 +747,15 @@ class NetworkWorker:
                     self.stop_event.wait(poll_seconds)
                 else:
                     self.stop_event.wait(poll_seconds)
-                _request_json(
+                heartbeat = _request_json(
                     self.base_url + "/api/heartbeat",
                     self.connection.token,
                     {"worker_id": self.worker_id},
                     timeout=15,
                 )
+                if not heartbeat.get("ok") and heartbeat.get("state") == "disconnected":
+                    self.event("[NETWORK] Disconnected by the main computer")
+                    return
                 self.refresh_status()
             except (OSError, urllib.error.URLError, ConnectionError, json.JSONDecodeError) as error:
                 self.event(f"[NETWORK] Connection error: {error}")
