@@ -1,4 +1,10 @@
-# Blender Render Watchdog 2.3
+# Blender Render Watchdog 2.4
+
+> В версии 2.4 добавлены безопасное автопродолжение незаконченного рендера после входа в Windows, отключение рабочих устройств с главного ПК, семь цветовых тем и собственный accent-цвет. Быстрые переходы теперь включены по умолчанию.
+
+![Blender Render Watchdog 2.4 — главный экран](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Dashboard.png)
+
+![Blender Render Watchdog 2.4 — темы и восстановление](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Settings.png)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
