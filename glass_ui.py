@@ -659,7 +659,17 @@ class GlassWidgetFactory:
 class GlassCard(tk.Canvas):
     """Rounded panel with a matte fill, soft shadow and a real ttk content frame."""
 
-    def __init__(self, parent, *, palette=None, padding: int = 18, radius: int = 24, backdrop=None, **kwargs) -> None:
+    def __init__(
+        self,
+        parent,
+        *,
+        palette=None,
+        padding: int = 18,
+        radius: int = 24,
+        backdrop=None,
+        effects_enabled: bool = True,
+        **kwargs,
+    ) -> None:
         self.palette = {**DEFAULT_PALETTE, **(palette or {})}
         self.radius = radius
         self.inset = 11
@@ -667,6 +677,7 @@ class GlassCard(tk.Canvas):
         self.glint = -1.0
         self._pulse_serial = 0
         self._glow_serial = 0
+        self.effects_enabled = effects_enabled
         super().__init__(
             parent,
             height=100,
@@ -682,7 +693,8 @@ class GlassCard(tk.Canvas):
         self.bind("<Configure>", self._resize)
         self.content.bind("<Configure>", self._content_resized, add="+")
         self.after_idle(self._content_resized)
-        self.after(80, self.enable_hover)
+        if self.effects_enabled:
+            self.after(80, self.enable_hover)
 
     def _content_resized(self, _event=None) -> None:
         requested = max(70, self.content.winfo_reqheight() + self.inset * 2)
@@ -734,6 +746,8 @@ class GlassCard(tk.Canvas):
         self.tag_lower("glass")
 
     def enable_hover(self) -> None:
+        if not self.effects_enabled:
+            return
         def descendants(widget):
             yield widget
             for child in widget.winfo_children():
@@ -751,6 +765,8 @@ class GlassCard(tk.Canvas):
         self.animate_glow(0.34 if inside else 0.0)
 
     def animate_glow(self, target: float) -> None:
+        if not self.effects_enabled:
+            return
         self._glow_serial += 1
         serial = self._glow_serial
 
@@ -769,6 +785,8 @@ class GlassCard(tk.Canvas):
         step()
 
     def reveal(self, delay: int = 0) -> None:
+        if not self.effects_enabled:
+            return
         self._pulse_serial += 1
         serial = self._pulse_serial
 
@@ -795,6 +813,8 @@ class GlassCard(tk.Canvas):
         self.after(max(0, delay), begin)
 
     def pulse(self) -> None:
+        if not self.effects_enabled:
+            return
         self._pulse_serial += 1
         serial = self._pulse_serial
         frame = 0
@@ -819,10 +839,11 @@ class GlassCard(tk.Canvas):
 class GlassTabView(tk.Frame):
     """Rounded pill navigation with horizontally animated page transitions."""
 
-    def __init__(self, parent, *, palette=None, translator=None, register=None, **kwargs) -> None:
+    def __init__(self, parent, *, palette=None, translator=None, register=None, lightweight: bool = True, **kwargs) -> None:
         self.palette = {**DEFAULT_PALETTE, **(palette or {})}
         self.translator = translator or (lambda text: text)
         self.register = register
+        self.lightweight = lightweight
         super().__init__(parent, background=self.palette["bg"], borderwidth=0, **kwargs)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
@@ -873,15 +894,21 @@ class GlassTabView(tk.Frame):
         previous_index = self.current_index
         previous = self.pages[previous_index]
         upcoming = self.pages[index]
+        self.current_index = index
+        for button_index, button in enumerate(self.buttons):
+            button.set_selected(button_index == index)
+        if self.lightweight:
+            previous.place_forget()
+            upcoming.place(x=0, y=0, relwidth=1, relheight=1)
+            upcoming.lift()
+            self.event_generate("<<NotebookTabChanged>>")
+            return upcoming
         direction = 1 if index > previous_index else -1
         width = max(640, self.page_host.winfo_width())
         upcoming.place(x=direction * width, y=0, relwidth=1, relheight=1)
         upcoming.lift()
-        self.current_index = index
-        for button_index, button in enumerate(self.buttons):
-            button.set_selected(button_index == index)
         started = self.winfo_toplevel().tk.call("clock", "milliseconds")
-        duration = 235.0
+        duration = 160.0
 
         def step() -> None:
             now = self.winfo_toplevel().tk.call("clock", "milliseconds")
@@ -890,7 +917,7 @@ class GlassTabView(tk.Frame):
             upcoming.place_configure(x=round(direction * width * (1 - eased)))
             previous.place_configure(x=round(-direction * width * 0.16 * eased))
             if progress < 1:
-                self._animation_id = self.after(16, step)
+                self._animation_id = self.after(24, step)
             else:
                 previous.place_forget()
                 upcoming.place_configure(x=0)
@@ -898,4 +925,5 @@ class GlassTabView(tk.Frame):
                 self.event_generate("<<NotebookTabChanged>>")
 
         step()
+        return upcoming
         return None
