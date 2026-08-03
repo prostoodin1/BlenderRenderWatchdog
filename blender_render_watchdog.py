@@ -24,12 +24,22 @@ import time
 from pathlib import Path
 
 from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
+from appearance import THEME_LABELS, build_palette, normalize_color, normalize_theme
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from mobile_dashboard import MobileDashboardServer
 from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator, prepare_network_project
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
+from resume_startup import (
+    RESUME_FILE_NAME,
+    arm_resume,
+    build_launch_command,
+    clear_resume_artifacts,
+    load_resume_state,
+    mark_resume_attempt,
+    windows_startup_dir,
+)
 from render_sandbox import SandboxVariant, recommend_variant, run_sandbox
 from video_tools import VIDEO_FORMATS, compose_video, video_output_path
 
@@ -62,8 +72,9 @@ LEGACY_CONFIG_PATH = Path(__file__).with_name("blender_render_watchdog_config.js
 CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
+RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.4.0"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -445,6 +456,17 @@ def app_target_path() -> Path:
     return Path(__file__)
 
 
+def resume_startup_file_path() -> Path:
+    return windows_startup_dir() / RESUME_FILE_NAME
+
+
+def resume_launch_command() -> str:
+    if getattr(sys, "frozen", False):
+        return build_launch_command(app_target_path())
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    return build_launch_command(pythonw if pythonw.exists() else Path(sys.executable), app_target_path())
+
+
 def update_check_command_path() -> Path:
     return app_target_path().parent / "Check Update.cmd"
 
@@ -606,6 +628,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--write-update-cmd", action="store_true", help="Create Check Update.cmd next to the app and exit.")
     parser.add_argument("--worker-code", default=None, help="Run as a network worker using a BRW2 connection code.")
     parser.add_argument("--worker-name", default=None, help="Display name used in network worker mode.")
+    parser.add_argument("--resume-unfinished", action="store_true", help="Resume the render saved by Windows startup recovery.")
     return parser.parse_args()
 
 
@@ -1244,7 +1267,7 @@ def run_watchdog(
 
 def run_gui(args: argparse.Namespace) -> int:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, scrolledtext, ttk
+    from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
 
     class WatchdogApp:
         def __init__(self, root: tk.Tk) -> None:
@@ -1253,28 +1276,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.root.geometry("1280x860")
             self.root.minsize(1080, 720)
 
-            self.colors = {
-                "bg": "#070a12",
-                "panel": "#111a2a",
-                "panel_alt": "#18243a",
-                "field": "#0b1220",
-                "field_border": "#2d3c58",
-                "text": "#f8fbff",
-                "muted": "#9aa9c2",
-                "soft": "#dce6f7",
-                "accent": "#8b7cff",
-                "accent_hot": "#aa9cff",
-                "accent_blue": "#6ee7ff",
-                "accent_dark": "#6553e8",
-                "accent_green": "#55f7b0",
-                "danger": "#ff6b8b",
-                "warning": "#ffd166",
-                "line": "#2d3c58",
-                "line_hot": "#7797c7",
-                "shadow": "#03050a",
-            }
-
             self.config = load_config()
+            self.theme_code = normalize_theme(self.config.get("theme"))
+            self.custom_accent = normalize_color(self.config.get("custom_accent"))
+            self.colors = build_palette(self.theme_code, self.custom_accent)
             self.language_code = normalize_language(self.config.get("language"))
             self.localizable_widgets: list[object] = []
             self.localizable_headings: list[tuple[object, str, str]] = []
@@ -1324,6 +1329,14 @@ def run_gui(args: argparse.Namespace) -> int:
             self.use_scene_range_var = tk.BooleanVar(value=(self.config.get("use_scene_range", default_scene_range) == "1"))
             self.use_scene_output_var = tk.BooleanVar(value=(self.config.get("use_scene_output", "0") == "1"))
             self.language_var = tk.StringVar(value=LANGUAGE_LABELS[self.language_code])
+            self.theme_var = tk.StringVar()
+            self.lightweight_motion_var = tk.BooleanVar(value=(self.config.get("lightweight_motion", "1") != "0"))
+            self.resume_unfinished_var = tk.BooleanVar(value=(self.config.get("resume_unfinished_enabled", "0") == "1"))
+            self.resume_status_var = tk.StringVar()
+            self.auto_resume_active = False
+            self.status_trace_id: str | None = None
+            self.update_theme_label()
+            self.refresh_resume_status()
             self.status_var = tk.StringVar()
             self.status_detail_var = tk.StringVar()
             self.set_localized(self.status_var, "Ready")
@@ -1404,6 +1417,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.root.after(800, self.check_for_updates)
             if self.mobile_enabled_var.get():
                 self.root.after(1200, self.start_mobile_dashboard)
+            if args.resume_unfinished:
+                self.root.after(650, self.resume_unfinished_render)
 
         def tr(self, source: str, **values: object) -> str:
             return translate(source, self.language_code, **values)
@@ -1464,7 +1479,163 @@ def run_gui(args: argparse.Namespace) -> int:
             for variable, source, values in self.localized_variables.values():
                 variable.set(self.tr(source, **values))
 
+            self.update_theme_label()
+            if hasattr(self, "theme_combo"):
+                self.theme_combo.configure(values=self.localized_theme_labels())
             self.save_current_config()
+
+        def localized_theme_labels(self) -> tuple[str, ...]:
+            return tuple(self.tr(label) for label in THEME_LABELS.values())
+
+        def update_theme_label(self) -> None:
+            self.theme_var.set(self.tr(THEME_LABELS[self.theme_code]))
+
+        def selected_theme_code(self) -> str:
+            selected = self.theme_var.get().strip().casefold()
+            for code, label in THEME_LABELS.items():
+                if selected in {label.casefold(), self.tr(label).casefold()}:
+                    return code
+            return self.theme_code
+
+        def change_theme(self, _event=None) -> None:
+            selected = self.selected_theme_code()
+            if selected == self.theme_code:
+                return
+            self.theme_code = selected
+            self.colors = build_palette(self.theme_code, self.custom_accent)
+            self.update_theme_label()
+            self.save_current_config()
+            self.rebuild_interface()
+
+        def choose_custom_accent(self) -> None:
+            _rgb, selected = colorchooser.askcolor(
+                color=self.custom_accent,
+                title=self.tr("Choose interface colour"),
+                parent=self.root,
+            )
+            if not selected:
+                return
+            self.custom_accent = normalize_color(selected, self.custom_accent)
+            self.theme_code = "custom"
+            self.colors = build_palette(self.theme_code, self.custom_accent)
+            self.update_theme_label()
+            self.save_current_config()
+            self.rebuild_interface()
+
+        def apply_motion_preference(self) -> None:
+            self.save_current_config()
+            self.rebuild_interface()
+
+        def rebuild_interface(self) -> None:
+            selected_tab = self.notebook.current_index if hasattr(self, "notebook") else 0
+            log_contents = self.log_text.get("1.0", "end-1c") if hasattr(self, "log_text") else ""
+            if self.status_trace_id:
+                try:
+                    self.status_var.trace_remove("write", self.status_trace_id)
+                except tk.TclError:
+                    pass
+                self.status_trace_id = None
+            for child in self.root.winfo_children():
+                child.destroy()
+            self.localizable_widgets.clear()
+            self.localizable_headings.clear()
+            self.glass_cards.clear()
+            self.card_reveal_index = 0
+            self.build_style(ttk)
+            self.build_layout(tk, ttk, scrolledtext)
+            if log_contents:
+                self.log_text.insert("1.0", log_contents)
+                self.log_text.see("end")
+            if selected_tab:
+                self.notebook.select(selected_tab)
+            self.update_manual_controls()
+            self.update_network_role_view()
+            self.refresh_queue_tree()
+            self.refresh_history_views()
+            self.refresh_resume_status()
+
+        def refresh_resume_status(self) -> None:
+            if not self.resume_unfinished_var.get():
+                self.set_localized(self.resume_status_var, "Startup recovery is off")
+                return
+            state = load_resume_state(RESUME_STATE_PATH)
+            if state is None:
+                self.set_localized(self.resume_status_var, "Ready · a Startup file will be created when rendering begins")
+                return
+            attempts = int(state.get("attempts") or 0)
+            if attempts >= 3:
+                self.set_localized(self.resume_status_var, "Automatic recovery paused after 3 attempts")
+                return
+            self.set_localized(
+                self.resume_status_var,
+                "Recovery armed · attempt {attempt}/3",
+                attempt=attempts,
+            )
+
+        def on_resume_unfinished_toggle(self) -> None:
+            if not self.resume_unfinished_var.get():
+                clear_resume_artifacts(RESUME_STATE_PATH, resume_startup_file_path())
+                self.refresh_resume_status()
+                self.save_current_config()
+                return
+            if self.worker and self.worker.is_alive():
+                mode = "queue" if self.queue_running else "single"
+                self.arm_unfinished_resume(mode)
+            else:
+                self.refresh_resume_status()
+            self.save_current_config()
+
+        def arm_unfinished_resume(self, mode: str) -> None:
+            if not self.resume_unfinished_var.get():
+                return
+            previous = load_resume_state(RESUME_STATE_PATH)
+            attempts = 0
+            if self.auto_resume_active and previous and str(previous.get("mode")) == mode:
+                attempts = int(previous.get("attempts") or 0)
+            try:
+                arm_resume(
+                    RESUME_STATE_PATH,
+                    resume_startup_file_path(),
+                    mode,
+                    resume_launch_command(),
+                    attempts=attempts,
+                )
+            except OSError as error:
+                self.log(f"[WATCHDOG] Could not create Startup recovery file: {error}")
+            self.refresh_resume_status()
+
+        def clear_unfinished_resume(self) -> None:
+            clear_resume_artifacts(RESUME_STATE_PATH, resume_startup_file_path())
+            self.refresh_resume_status()
+
+        def resume_unfinished_render(self) -> None:
+            state = load_resume_state(RESUME_STATE_PATH)
+            if state is None:
+                return
+            if not self.resume_unfinished_var.get():
+                clear_resume_artifacts(RESUME_STATE_PATH, resume_startup_file_path())
+                return
+            attempts = int(state.get("attempts") or 0)
+            if attempts >= 3:
+                try:
+                    resume_startup_file_path().unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.refresh_resume_status()
+                self.set_localized(self.status_var, "Recovery paused")
+                self.set_localized(self.status_detail_var, "Open the app and start the render manually")
+                return
+            updated = mark_resume_attempt(RESUME_STATE_PATH)
+            if updated is None:
+                return
+            self.auto_resume_active = True
+            self.refresh_resume_status()
+            self.log("[WATCHDOG] Windows Startup recovery is resuming an unfinished render.")
+            if str(updated.get("mode")) == "queue":
+                self.start_render_queue()
+            else:
+                self.start_watchdog()
+            self.auto_resume_active = False
 
         def build_style(self, ttk_module) -> None:
             style = ttk_module.Style()
@@ -1495,9 +1666,9 @@ def run_gui(args: argparse.Namespace) -> int:
             style.configure("TEntry", fieldbackground=c["field"], foreground=c["text"], insertcolor=c["text"], bordercolor=c["field_border"], lightcolor=c["field_border"], darkcolor=c["field_border"], padding=11)
             style.map("TEntry", bordercolor=[("focus", c["accent"])] )
             style.configure("TButton", background=c["panel_alt"], foreground=c["text"], borderwidth=0, focusthickness=0, padding=(15, 10), font=("Segoe UI", 10, "bold"))
-            style.map("TButton", background=[("active", "#1b2942"), ("disabled", "#111827")], foreground=[("disabled", "#65738a")])
+            style.map("TButton", background=[("active", c["line"]), ("disabled", c["field"])], foreground=[("disabled", c["muted"])])
             style.configure("Primary.TButton", background=c["accent"], foreground="#031014", padding=(24, 13), font=("Segoe UI", 11, "bold"))
-            style.map("Primary.TButton", background=[("active", "#8cf3ff"), ("disabled", "#174a55")], foreground=[("disabled", "#8db5bd")])
+            style.map("Primary.TButton", background=[("active", c["accent_hot"]), ("disabled", c["accent_dark"])], foreground=[("disabled", c["muted"])])
             style.configure("Danger.TButton", background="#3b1724", foreground="#ffd9e2", padding=(17, 12), font=("Segoe UI", 10, "bold"))
             style.map("Danger.TButton", background=[("active", "#5a2234"), ("disabled", "#151923")], foreground=[("disabled", "#65738a")])
             style.configure("Modern.TCheckbutton", background=c["panel_alt"], foreground=c["text"], font=("Segoe UI", 10, "bold"), padding=7)
@@ -1505,7 +1676,7 @@ def run_gui(args: argparse.Namespace) -> int:
             style.configure("Modern.Horizontal.TProgressbar", troughcolor=c["field"], background=c["accent"], bordercolor=c["panel"], lightcolor=c["accent"], darkcolor=c["accent"], thickness=16)
             style.configure("Modern.TNotebook", background=c["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
             style.configure("Modern.TNotebook.Tab", background=c["panel"], foreground=c["muted"], padding=(22, 12), font=("Segoe UI", 10, "bold"))
-            style.map("Modern.TNotebook.Tab", background=[("selected", c["panel_alt"]), ("active", "#1b2942")], foreground=[("selected", c["accent"]), ("active", c["text"])])
+            style.map("Modern.TNotebook.Tab", background=[("selected", c["panel_alt"]), ("active", c["line"])], foreground=[("selected", c["accent"]), ("active", c["text"])])
             style.configure(
                 "Glass.TCombobox",
                 fieldbackground=c["field"],
@@ -1577,13 +1748,14 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Label(status_card, text="CURRENT STATE", style="Mini.TLabel").pack(anchor="w")
             ttk_module.Label(status_card, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w", pady=(4, 0))
             ttk_module.Label(status_card, textvariable=self.status_detail_var, style="StatusDetail.TLabel").pack(anchor="w", pady=(6, 0))
-            self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
+            self.status_trace_id = self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
 
             self.notebook = GlassTabView(
                 outer,
                 palette=c,
                 translator=self.tr,
                 register=self.register_localizable_widget,
+                lightweight=self.lightweight_motion_var.get(),
             )
             self.notebook.grid(row=1, column=0, sticky="nsew")
 
@@ -1914,6 +2086,17 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Entry(allocation, textvariable=self.worker_samples_var, width=9).grid(row=1, column=1, padx=(10, 4), pady=(8, 0))
             ttk_module.Button(allocation, text="Automatic frames", command=self.set_selected_worker_auto).grid(row=1, column=2, columnspan=2, pady=(8, 0))
             ttk_module.Label(allocation, text="Empty Samples uses the scene setting", style="CardHint.TLabel").grid(row=1, column=4, columnspan=2, sticky="w", padx=(10, 0), pady=(8, 0))
+            ttk_module.Button(
+                allocation,
+                text="Disconnect selected device",
+                style="Danger.TButton",
+                command=self.disconnect_selected_network_device,
+            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+            ttk_module.Label(
+                allocation,
+                text="Its active frame returns to the queue",
+                style="CardHint.TLabel",
+            ).grid(row=2, column=3, columnspan=3, sticky="w", padx=(10, 0), pady=(10, 0))
             self.root.after_idle(self.update_network_role_view)
             self.root.after_idle(self.update_network_range_mode_view)
 
@@ -2164,31 +2347,26 @@ def run_gui(args: argparse.Namespace) -> int:
                 wraplength=300,
                 justify="left",
             ).grid(row=1, column=0, sticky="ew", pady=(8, 16))
+            power_options = ttk_module.Frame(power_card, style="Surface.TFrame")
+            power_options.grid(row=2, column=0, sticky="ew")
             ttk_module.Checkbutton(
-                power_card,
+                power_options,
                 text="Shutdown PC after successful render",
                 variable=self.shutdown_after_render_var,
                 command=self.save_current_config,
                 style="Modern.TCheckbutton",
-            ).grid(row=2, column=0, sticky="w")
-            ttk_module.Label(
-                power_card,
-                text="Tip: if shutdown starts accidentally, run `shutdown /a` in Windows to cancel it.",
-                style="CardHint.TLabel",
-                wraplength=300,
-                justify="left",
-            ).grid(row=3, column=0, sticky="ew", pady=(14, 0))
+            ).grid(row=0, column=0, sticky="w")
+            ttk_module.Checkbutton(
+                power_options,
+                text="Fast transitions",
+                variable=self.lightweight_motion_var,
+                command=self.apply_motion_preference,
+                style="Modern.TCheckbutton",
+            ).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
-            ttk_module.Label(power_card, text="Interface", style="CardTitle.TLabel").grid(row=4, column=0, sticky="w", pady=(28, 0))
-            ttk_module.Label(
-                power_card,
-                text="Changes apply instantly and the selected language is remembered.",
-                style="CardHint.TLabel",
-                wraplength=300,
-                justify="left",
-            ).grid(row=5, column=0, sticky="ew", pady=(6, 14))
+            ttk_module.Label(power_card, text="Interface", style="CardTitle.TLabel").grid(row=3, column=0, sticky="w", pady=(18, 8))
             language_row = ttk_module.Frame(power_card, style="Surface.TFrame")
-            language_row.grid(row=6, column=0, sticky="ew")
+            language_row.grid(row=4, column=0, sticky="ew")
             language_row.columnconfigure(1, weight=1)
             ttk_module.Label(language_row, text="Language", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
             self.language_combo = ttk_module.Combobox(
@@ -2200,6 +2378,25 @@ def run_gui(args: argparse.Namespace) -> int:
             )
             self.language_combo.grid(row=0, column=1, sticky="ew")
             self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
+
+            theme_row = ttk_module.Frame(power_card, style="Surface.TFrame")
+            theme_row.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+            theme_row.columnconfigure(1, weight=1)
+            ttk_module.Label(theme_row, text="Colour theme", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+            self.theme_combo = ttk_module.Combobox(
+                theme_row,
+                textvariable=self.theme_var,
+                values=self.localized_theme_labels(),
+                state="readonly",
+                width=13,
+            )
+            self.theme_combo.grid(row=0, column=1, sticky="ew")
+            self.theme_combo.bind("<<ComboboxSelected>>", self.change_theme)
+            ttk_module.Button(
+                theme_row,
+                text="Choose custom colour",
+                command=self.choose_custom_accent,
+            ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
             mobile_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="ew", padx=(0, 12), pady=(14, 0))
             mobile_card.columnconfigure(1, weight=1)
@@ -2219,14 +2416,42 @@ def run_gui(args: argparse.Namespace) -> int:
                 wraplength=300,
                 justify="left",
             ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
+            ttk_module.Label(privacy_card, text="Startup recovery", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(24, 0))
+            ttk_module.Label(
+                privacy_card,
+                text="If Windows restarts before a render finishes, create a temporary Startup file and continue at the next login.",
+                style="CardHint.TLabel",
+                wraplength=300,
+                justify="left",
+            ).grid(row=3, column=0, sticky="ew", pady=(8, 8))
+            ttk_module.Checkbutton(
+                privacy_card,
+                text="Resume unfinished render at Windows login",
+                variable=self.resume_unfinished_var,
+                command=self.on_resume_unfinished_toggle,
+                style="Modern.TCheckbutton",
+            ).grid(row=4, column=0, sticky="w")
+            ttk_module.Label(
+                privacy_card,
+                textvariable=self.resume_status_var,
+                style="CardHint.TLabel",
+                wraplength=300,
+                justify="left",
+            ).grid(row=5, column=0, sticky="ew", pady=(8, 0))
         def add_optimization_check(self, parent, ttk_module, row: int, variable: tk.BooleanVar, title: str, hint: str) -> None:
             ttk_module.Checkbutton(parent, text=title, variable=variable, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=row, column=0, sticky="w", pady=6)
             ttk_module.Label(parent, text=hint, style="CardHint.TLabel").grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
         def make_card(self, parent, ttk_module, row: int, column: int, sticky: str = "nsew", padx=0, pady=0, rowspan: int = 1):
-            card = GlassCard(parent, palette=self.colors, padding=18, radius=24, backdrop=self.colors["bg"])
+            card = GlassCard(
+                parent,
+                palette=self.colors,
+                padding=18,
+                radius=24,
+                backdrop=self.colors["bg"],
+                effects_enabled=not self.lightweight_motion_var.get(),
+            )
             card.grid(row=row, column=column, rowspan=rowspan, sticky=sticky, padx=padx, pady=pady)
             self.glass_cards.append(card)
-            card.reveal(self.card_reveal_index * 38)
             self.card_reveal_index += 1
             return card.content
 
@@ -2302,14 +2527,15 @@ def run_gui(args: argparse.Namespace) -> int:
             step()
 
         def animate_tab_change(self, _event=None) -> None:
+            if self.lightweight_motion_var.get():
+                return
+
             def reveal_visible_cards() -> None:
-                delay = 0
                 for card in self.glass_cards:
                     if card.winfo_ismapped():
-                        card.reveal(delay)
-                        delay += 34
+                        card.pulse()
 
-            self.root.after(20, reveal_visible_cards)
+            self.root.after(30, reveal_visible_cards)
 
         def animate_progress(self, target: float) -> None:
             self.progress_animation_target = max(0.0, min(100.0, target))
@@ -2537,6 +2763,9 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.shutdown_after_render_var,
                 self.mobile_enabled_var,
                 self.language_var,
+                self.theme_var,
+                self.lightweight_motion_var,
+                self.resume_unfinished_var,
                 self.network_role_var,
                 self.network_use_local_var,
                 self.controller_name_var,
@@ -2588,6 +2817,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     "shutdown_after_render": "1" if self.shutdown_after_render_var.get() else "0",
                     "mobile_enabled": "1" if self.mobile_enabled_var.get() else "0",
                     "language": self.language_code,
+                    "theme": self.theme_code,
+                    "custom_accent": self.custom_accent,
+                    "lightweight_motion": "1" if self.lightweight_motion_var.get() else "0",
+                    "resume_unfinished_enabled": "1" if self.resume_unfinished_var.get() else "0",
                     "network_role": self.network_role_var.get(),
                     "network_use_local": "1" if self.network_use_local_var.get() else "0",
                     "network_controller_name": self.controller_name_var.get().strip(),
@@ -3168,6 +3401,41 @@ def run_gui(args: argparse.Namespace) -> int:
             self.worker_range_end_var.set("" if device.get("frame_end") is None else str(device["frame_end"]))
             self.worker_samples_var.set("" if device.get("samples") is None else str(device["samples"]))
 
+        def disconnect_selected_network_device(self) -> None:
+            controller = self.network_controller
+            if controller is None:
+                messagebox.showerror(self.tr("Disconnect device"), self.tr("Start the main computer controller first."))
+                return
+            selection = self.network_tree.selection()
+            if not selection:
+                messagebox.showinfo(self.tr("Disconnect device"), self.tr("Select a connected device first."))
+                return
+            item_id = str(selection[0])
+            device = self.network_device_rows.get(item_id, {})
+            if device.get("is_controller"):
+                messagebox.showinfo(self.tr("Disconnect device"), self.tr("The main computer cannot disconnect itself."))
+                return
+            worker_id = self.network_device_worker_ids.get(item_id, "")
+            name = str(device.get("name") or self.tr("Device"))
+            if not worker_id:
+                messagebox.showerror(self.tr("Disconnect device"), self.tr("This device is no longer connected."))
+                self.refresh_network_state()
+                return
+            should_disconnect = messagebox.askyesno(
+                self.tr("Disconnect device"),
+                self.tr(
+                    "Disconnect {device} from this render network? Its active frame will return to the queue.",
+                    device=name,
+                ),
+            )
+            if not should_disconnect:
+                return
+            if controller.disconnect_worker(worker_id):
+                self.set_localized(self.network_status_var, "Disconnected {device}", device=name)
+            else:
+                self.set_localized(self.network_status_var, "Device was already disconnected")
+            self.refresh_network_state()
+
         def refresh_network_state(self) -> None:
             controller = self.network_controller
             if hasattr(self, "network_tree"):
@@ -3390,6 +3658,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.start_queue_button.configure(state="disabled")
             self.log("")
             self.log("Starting watchdog...")
+            self.arm_unfinished_resume("single")
 
             worker_options = self.optimization_options()
             max_restarts = self.parse_positive_int(self.max_restarts_var.get(), 3, 0, 100)
@@ -3535,6 +3804,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.start_queue_button.configure(state="disabled")
             self.pause_button.configure(state="normal")
             self.stop_button.configure(state="normal")
+            self.arm_unfinished_resume("queue")
 
             worker_options = self.optimization_options()
             max_restarts = self.parse_positive_int(self.max_restarts_var.get(), 3, 0, 100)
@@ -3712,6 +3982,7 @@ def run_gui(args: argparse.Namespace) -> int:
         def stop_watchdog(self) -> None:
             if self.stop_event:
                 self.stop_event.set()
+                self.clear_unfinished_resume()
                 self.set_localized(self.status_var, "Stopping")
                 self.set_localized(self.status_detail_var, "Terminating Blender safely")
                 self.pause_button.configure(state="disabled")
@@ -3871,11 +4142,14 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.start_queue_button.configure(state="normal")
                         send_notification("Blender Render Watchdog", "Render queue paused after the current frame.")
                     elif self.stop_event and self.stop_event.is_set():
+                        self.clear_unfinished_resume()
                         self.set_localized(self.status_var, "Stopped")
                         self.set_localized(self.status_detail_var, "Render queue stopped")
                         self.set_widget_text(self.start_queue_button, "Continue queue")
                         self.start_queue_button.configure(state="normal")
                     else:
+                        if failed == 0:
+                            self.clear_unfinished_resume()
                         self.set_localized(self.status_var, "Queue complete")
                         self.set_localized(
                             self.status_detail_var,
@@ -3897,6 +4171,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__FINISHED__":
                     code = int(message[1])
                     if code == 0:
+                        self.clear_unfinished_resume()
                         self.is_paused = False
                         self.paused_queue = False
                         self.set_localized(self.status_var, "Complete")
@@ -3915,6 +4190,7 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.start_button.configure(state="normal")
                         send_notification("Blender Render Watchdog", "Render paused after current frame.")
                     elif code == 130:
+                        self.clear_unfinished_resume()
                         self.is_paused = False
                         self.paused_queue = False
                         self.set_localized(self.status_var, "Stopped")

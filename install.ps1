@@ -8,6 +8,7 @@ $StartMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Bl
 $AppFile = Join-Path $InstallDir "blender_render_watchdog.py"
 $SourceFiles = @(
     "blender_render_watchdog.py",
+    "appearance.py",
     "auto_fix.py",
     "glass_ui.py",
     "localization.py",
@@ -15,6 +16,7 @@ $SourceFiles = @(
     "network_render.py",
     "render_analytics.py",
     "render_queue.py",
+    "resume_startup.py",
     "render_sandbox.py",
     "video_tools.py"
 )
