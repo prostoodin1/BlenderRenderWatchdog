@@ -1,12 +1,26 @@
-# Blender Render Watchdog 2.3.1
+# Blender Render Watchdog 2.4.0
 
-Version 2.3.1 verifies every final network-rendered frame on the main computer.
+Версия 2.4.0 добавляет безопасное продолжение рендера после перезапуска Windows, управление рабочими ПК с контроллера и более лёгкий настраиваемый интерфейс.
 
-Highlights:
+## Главное
 
-- after all workers finish, the main PC validates every output frame;
-- PNG files receive full chunk and checksum validation, with structural checks for JPEG, EXR, TIFF, WebP, BMP, HDR and TGA;
-- corrupt frames are quarantined with a `.corrupt-*` suffix instead of being destroyed;
-- failed integrity checks return the frame to the shared queue for another worker;
-- completion is reported only after the repeated frame passes the final audit;
-- a frame that fails three render attempts remains visibly failed instead of looping forever.
+- **Автопродолжение:** опциональный временный `.cmd` создаётся в Windows Startup только во время незаконченного одиночного рендера или очереди. После успеха или ручной остановки он удаляется; после паузы или ошибки остаётся. Не больше трёх автоматических попыток входа в Windows.
+- **Отключение устройств:** главный ПК может отключить выбранный рабочий компьютер. Его активный кадр сразу возвращается в общую очередь, а удалённый процесс корректно завершает сетевой цикл.
+- **Свои цвета:** Graphite, Ocean, Emerald, Amber, Rose, Violet и произвольный accent через системный выбор цвета. Нейтральный Graphite теперь используется по умолчанию.
+- **Быстрые вкладки:** режим Fast transitions включён по умолчанию, убирает тяжёлые световые проходы карточек и переключает вкладки без задержки. Полная анимация тоже стала короче и требует меньше перерисовок.
+- **Языки:** весь новый интерфейс доступен на английском и русском.
+
+## Проверка и размер кода
+
+- 51 автоматический тест — все пройдены;
+- основной скрипт `blender_render_watchdog.py`: **4 359 строк**;
+- все 12 runtime-модулей Python: **7 550 строк** (без тестов);
+- тесты: 725 строк в 11 файлах.
+
+SHA-256 `BlenderRenderWatchdog.exe`: `88835dcef206d262d06dccda2eb5aeffc2837284f8da639c5daf695351fe90ec`
+
+## Скриншоты
+
+![Главный экран](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Dashboard.png)
+
+![Темы и восстановление](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Settings.png)

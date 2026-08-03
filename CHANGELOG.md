@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.4.0 — 2026-08-03
+
+### Unfinished-render startup recovery
+
+- Added an opt-in Windows Startup recovery file for single renders and the persistent queue.
+- Keep recovery armed while work is paused or failed, and remove it after success or an explicit stop.
+- Limit unattended login recovery to three attempts so a broken setup cannot loop forever.
+
+### Main-PC device control
+
+- Added a controller action that disconnects a selected render worker.
+- Return the disconnected worker's active frame to the shared queue immediately.
+- Tell remote workers to exit cleanly when the controller has disconnected them.
+
+### Faster customizable interface
+
+- Added Graphite, Ocean, Emerald, Amber, Rose, Violet and custom accent themes.
+- Made neutral Graphite the new default instead of violet.
+- Added Fast transitions, which removes card sweeps and swaps tabs immediately by default.
+- Reduced the full-motion tab transition from 235 ms to 160 ms with fewer redraws.
+
+### Engineering
+
+- Added appearance, startup-recovery and worker-disconnect tests; the suite now contains 51 tests.
+- Updated source installation, uninstallation, mobile identity and CI compilation for 2.4.
+
 ## 2.3.1 — 2026-08-01
 
 ### Final frame integrity audit

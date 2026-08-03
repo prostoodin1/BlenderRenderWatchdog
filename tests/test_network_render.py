@@ -58,8 +58,42 @@ class SchedulerTests(unittest.TestCase):
         task = plan.complete(worker, 1, False, "crash")
         self.assertEqual(task.status, "pending")
 
+    def test_disconnected_worker_frame_is_requeued_immediately(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 2)
+        worker = WorkerState("worker-a", "Worker")
+        task = plan.claim(worker)
+        self.assertEqual(task.status, "running")
+
+        released = plan.release_worker(worker.worker_id)
+
+        self.assertEqual(released, [1])
+        self.assertEqual(task.status, "pending")
+        self.assertEqual(task.worker_id, "")
+
 
 class CoordinatorHttpTests(unittest.TestCase):
+    def test_controller_disconnects_worker_and_requeues_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blend = root / "scene.blend"
+            blend.write_bytes(b"blend")
+            coordinator = RenderCoordinator(bind_host="127.0.0.1", advertised_host="127.0.0.1")
+            coordinator.start()
+            try:
+                coordinator.start_plan(blend, root / "renders", 1, 1)
+                base = f"http://127.0.0.1:{coordinator.port}"
+                joined = _request_json(base + "/api/join", coordinator.token, {"name": "Remote", "hardware": "GPU"})
+                worker_id = str(joined["worker_id"])
+                _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
+
+                self.assertTrue(coordinator.disconnect_worker(worker_id))
+                self.assertEqual(coordinator.plan.summary()["pending"], 1)
+                response = _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
+                self.assertEqual(response["state"], "disconnected")
+                self.assertFalse(response["ok"])
+            finally:
+                coordinator.stop()
+
     def test_worker_join_task_and_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
