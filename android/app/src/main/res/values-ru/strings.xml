@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Blender Watchdog</string>
-    <string name="eyebrow">BLENDER WATCHDOG 2.4.1</string>
+    <string name="eyebrow">BLENDER WATCHDOG 2.4.2</string>
     <string name="devices">Устройства</string>
     <string name="history">История</string>
     <string name="settings">Настройки</string>
@@ -38,5 +38,5 @@
     <string name="saved_devices">Сохранено устройств: %1$d</string>
     <string name="clear_devices">Удалить все устройства</string>
     <string name="security_note">Код синхронизации равен паролю. Смените ключ доступа на ПК, чтобы отозвать все старые коды телефонов.</string>
-    <string name="about">Нативное Android-приложение · версия 2.4.1</string>
+    <string name="about">Нативное Android-приложение · версия 2.4.2</string>
 </resources>

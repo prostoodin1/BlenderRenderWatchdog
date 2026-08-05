@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Blender Watchdog</string>
-    <string name="eyebrow">BLENDER WATCHDOG 2.4.1</string>
+    <string name="eyebrow">BLENDER WATCHDOG 2.4.2</string>
     <string name="devices">Devices</string>
     <string name="history">History</string>
     <string name="settings">Settings</string>
@@ -38,5 +38,5 @@
     <string name="saved_devices">Saved devices: %1$d</string>
     <string name="clear_devices">Remove all devices</string>
     <string name="security_note">Treat a sync code like a password. Change the access key on the desktop to revoke every old phone code.</string>
-    <string name="about">Native Android client · version 2.4.1</string>
+    <string name="about">Native Android client · version 2.4.2</string>
 </resources>
