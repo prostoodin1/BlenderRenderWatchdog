@@ -36,6 +36,7 @@ def validate_access_key(value: str) -> str:
 def service_token(access_key: str, service: str) -> str:
     """Derive independent bearer tokens without exposing the saved master key."""
     key = validate_access_key(access_key).encode("utf-8")
+    # Keep this namespace unchanged so persistent 2.4.1 codes survive upgrades.
     digest = hmac.new(key, f"BlenderRenderWatchdog/2.4.1/{service}".encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest[:21]).decode("ascii").rstrip("=")
 
@@ -62,7 +63,7 @@ class MobileSyncCode:
     port: int
     token: str
     name: str
-    version: str = "2.4.1"
+    version: str = "2.4.2"
 
     def encode(self) -> str:
         payload = json.dumps(

@@ -5,7 +5,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json
+from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, worker_device_script
 
 
 VALID_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -106,15 +106,18 @@ class CoordinatorHttpTests(unittest.TestCase):
                 base = f"http://127.0.0.1:{coordinator.port}"
                 joined = _request_json(base + "/api/join", coordinator.token, {"name": "Test", "hardware": "CPU"})
                 worker_id = str(joined["worker_id"])
-                coordinator.set_worker_settings(worker_id, 3, 3, 64)
+                coordinator.set_worker_settings(worker_id, 3, 3, 64, False, True)
                 status = _request_json(base + "/api/status", coordinator.token)
                 self.assertEqual(status["controller"]["name"], coordinator.controller_name)
                 self.assertEqual(len(status["devices"]), 2)
                 self.assertTrue(status["devices"][0]["is_controller"])
                 self.assertEqual(status["devices"][1]["name"], "Test")
+                self.assertEqual(status["devices"][1]["render_device"], "GPU")
                 task = _request_json(base + f"/api/task?worker_id={worker_id}", coordinator.token)
                 self.assertEqual(task["frame"], 3)
                 self.assertEqual(task["samples"], 64)
+                self.assertFalse(task["use_cpu"])
+                self.assertTrue(task["use_gpu"])
                 result = _request_json(
                     base + "/api/result",
                     coordinator.token,
@@ -130,6 +133,19 @@ class CoordinatorHttpTests(unittest.TestCase):
                 self.assertEqual((root / "renders" / "frame_0003.png").read_bytes(), VALID_PNG)
             finally:
                 coordinator.stop()
+
+    def test_controller_rejects_disabling_every_render_device(self) -> None:
+        coordinator = RenderCoordinator()
+        worker_id = coordinator.join("Test", "GPU")[0]["worker_id"]
+        with self.assertRaises(ValueError):
+            coordinator.set_worker_settings(str(worker_id), None, None, None, False, False)
+
+    def test_worker_device_script_applies_gpu_cpu_and_samples(self) -> None:
+        script = worker_device_script(True, True, 128)
+        self.assertIn("USE_CPU = True", script)
+        self.assertIn("USE_GPU = True", script)
+        self.assertIn("SAMPLES = 128", script)
+        self.assertIn('scene.cycles.device = "GPU"', script)
 
     def test_full_worker_loop_downloads_project_and_uploads_frames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

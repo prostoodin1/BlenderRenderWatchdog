@@ -7,7 +7,14 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.RectF;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
@@ -93,7 +100,7 @@ public class MainActivity extends Activity {
         LinearLayout root = vertical();
         GradientDrawable background = new GradientDrawable(
             GradientDrawable.Orientation.TL_BR,
-            new int[]{Color.rgb(17, 42, 46), Color.rgb(10, 17, 23), Color.rgb(20, 28, 38)}
+            new int[]{Color.rgb(20, 53, 57), Color.rgb(8, 16, 22), Color.rgb(24, 29, 43)}
         );
         root.setBackground(background);
         content = new FrameLayout(this);
@@ -102,17 +109,28 @@ public class MainActivity extends Activity {
         nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setGravity(Gravity.CENTER);
-        nav.setPadding(dp(8), dp(8), dp(8), dp(10));
-        nav.setBackground(glass(Color.argb(238, 22, 36, 44), 0, Color.argb(95, 255, 255, 255)));
+        nav.setPadding(dp(9), dp(11), dp(9), dp(8));
+        nav.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        nav.setBackground(new CloudNavDrawable());
         addNavButton(R.string.devices, 0);
         addNavButton(R.string.history, 1);
         addNavButton(R.string.settings, 2);
-        root.addView(nav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)));
+        LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(82));
+        navParams.setMargins(dp(14), 0, dp(14), dp(12));
+        root.addView(nav, navParams);
         setContentView(root);
     }
 
     private void addNavButton(int label, int tab) {
-        Button button = actionButton(getString(label), false);
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(getString(label));
+        button.setTextSize(12);
+        button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(MUTED);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(6), 0, dp(6), 0);
+        button.setBackgroundColor(Color.TRANSPARENT);
         button.setTag(tab);
         button.setOnClickListener(view -> selectTab((int) view.getTag()));
         nav.addView(button, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
@@ -121,10 +139,7 @@ public class MainActivity extends Activity {
     private void selectTab(int tab) {
         currentTab = tab;
         main.removeCallbacks(poller);
-        for (int index = 0; index < nav.getChildCount(); index++) {
-            View item = nav.getChildAt(index);
-            item.setAlpha(index == tab ? 1f : .58f);
-        }
+        selectNavOnly(tab);
         if (tab == 0) showDevices();
         else if (tab == 1) showHistory();
         else showSettings();
@@ -136,7 +151,7 @@ public class MainActivity extends Activity {
         TextView eyebrow = text(getString(R.string.eyebrow), 12, ACCENT, Typeface.BOLD);
         eyebrow.setLetterSpacing(.12f);
         page.addView(eyebrow);
-        TextView heading = text(getString(title), 29, WHITE, Typeface.BOLD);
+        TextView heading = text(getString(title), 31, WHITE, Typeface.BOLD);
         page.addView(heading, margins(-1, -2, 0, 0, 0));
         TextView subtitle = text(getString(hint), 14, MUTED, Typeface.NORMAL);
         subtitle.setLineSpacing(0, 1.18f);
@@ -450,8 +465,8 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = vertical();
         card.setPadding(dp(17), dp(16), dp(17), dp(16));
-        card.setBackground(glass(Color.argb(218, 22, 40, 48), 24, Color.argb(82, 255, 255, 255)));
-        card.setElevation(dp(7));
+        card.setBackground(glass(Color.argb(222, 21, 40, 49), 28, Color.argb(94, 255, 255, 255)));
+        card.setElevation(dp(10));
         card.setClipToOutline(true);
         card.setLayoutParams(margins(-1, -2, 0, 0, dp(13)));
         return card;
@@ -535,7 +550,56 @@ public class MainActivity extends Activity {
     }
 
     private void selectNavOnly(int tab) {
-        for (int index = 0; index < nav.getChildCount(); index++) nav.getChildAt(index).setAlpha(index == tab ? 1f : .58f);
+        for (int index = 0; index < nav.getChildCount(); index++) {
+            View item = nav.getChildAt(index);
+            boolean selected = index == tab;
+            item.animate().alpha(selected ? 1f : .62f).scaleX(selected ? 1.03f : .96f).scaleY(selected ? 1.03f : .96f).setDuration(180).start();
+            if (item instanceof Button) {
+                ((Button) item).setTextColor(selected ? WHITE : MUTED);
+                item.setBackground(selected
+                    ? glass(Color.argb(170, 58, 104, 106), 23, Color.argb(110, 255, 255, 255))
+                    : glass(Color.TRANSPARENT, 23, Color.TRANSPARENT));
+            }
+        }
+    }
+
+    private final class CloudNavDrawable extends Drawable {
+        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint highlight = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path cloud = new Path();
+
+        CloudNavDrawable() {
+            fill.setColor(Color.argb(238, 20, 35, 43));
+            fill.setShadowLayer(dp(14), 0, dp(7), Color.argb(145, 0, 0, 0));
+            border.setStyle(Paint.Style.STROKE);
+            border.setStrokeWidth(dp(1));
+            border.setColor(Color.argb(95, 255, 255, 255));
+            highlight.setStyle(Paint.Style.STROKE);
+            highlight.setStrokeWidth(dp(1));
+            highlight.setColor(Color.argb(90, 255, 255, 255));
+        }
+
+        @Override public void draw(Canvas canvas) {
+            RectF bounds = new RectF(getBounds());
+            float inset = dp(5);
+            RectF base = new RectF(bounds.left + inset, bounds.top + dp(16), bounds.right - inset, bounds.bottom - dp(5));
+            cloud.reset();
+            cloud.addRoundRect(base, dp(30), dp(30), Path.Direction.CW);
+            for (int index = 0; index < 3; index++) {
+                float center = bounds.left + bounds.width() * (index * 2 + 1) / 6f;
+                Path bubble = new Path();
+                bubble.addCircle(center, bounds.top + dp(24), dp(24), Path.Direction.CW);
+                cloud.op(bubble, Path.Op.UNION);
+            }
+            canvas.drawPath(cloud, fill);
+            canvas.drawPath(cloud, border);
+            canvas.drawArc(base.left + dp(16), base.top + dp(3), base.right - dp(16), base.bottom - dp(19), 200, 140, false, highlight);
+        }
+
+        @Override public void setAlpha(int alpha) { fill.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter filter) { fill.setColorFilter(filter); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     private final class DeviceBinding {

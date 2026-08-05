@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from frame_validation import validate_frame
+from process_utils import hidden_subprocess_kwargs
 
 
 MAX_WORKERS = 5
@@ -68,6 +69,7 @@ def prepare_network_project(
             encoding="utf-8",
             errors="replace",
             timeout=900,
+            **hidden_subprocess_kwargs(),
         )
         if completed.returncode != 0 or not destination.exists():
             raise RuntimeError((completed.stdout + completed.stderr)[-2000:] or "Could not create packed network project")
@@ -124,11 +126,59 @@ class WorkerState:
     frame_start: int | None = None
     frame_end: int | None = None
     samples: int | None = None
+    use_cpu: bool = True
+    use_gpu: bool = True
 
     def public_dict(self) -> dict[str, object]:
         data = asdict(self)
         data["online"] = time.time() - self.last_seen < 30
+        data["render_device"] = render_device_label(self.use_cpu, self.use_gpu)
         return data
+
+
+def render_device_label(use_cpu: bool, use_gpu: bool) -> str:
+    if use_gpu and use_cpu:
+        return "GPU + CPU"
+    if use_gpu:
+        return "GPU"
+    return "CPU"
+
+
+def worker_device_script(use_cpu: bool, use_gpu: bool, samples: int | None) -> str:
+    """Build the per-frame Cycles device setup used by remote workers."""
+    return f'''import bpy
+USE_CPU = {bool(use_cpu)!r}
+USE_GPU = {bool(use_gpu)!r}
+SAMPLES = {int(samples) if samples is not None else None!r}
+scene = bpy.context.scene
+if scene.render.engine == "CYCLES":
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    selected_backend = None
+    if USE_GPU:
+        for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
+            try:
+                prefs.compute_device_type = backend
+                prefs.get_devices()
+                if any(device.type != "CPU" for device in prefs.devices):
+                    selected_backend = backend
+                    break
+            except Exception:
+                pass
+    if USE_GPU and selected_backend:
+        scene.cycles.device = "GPU"
+        for device in prefs.devices:
+            device.use = bool(device.type != "CPU" or USE_CPU)
+    else:
+        scene.cycles.device = "CPU"
+        try:
+            prefs.get_devices()
+            for device in prefs.devices:
+                device.use = bool(device.type == "CPU")
+        except Exception:
+            pass
+    if SAMPLES is not None:
+        scene.cycles.samples = SAMPLES
+'''
 
 
 @dataclass(slots=True)
@@ -310,7 +360,7 @@ class RenderCoordinator:
         coordinator = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "BlenderRenderWatchdog/2.4"
+            server_version = "BlenderRenderWatchdog/2.4.2"
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -372,7 +422,12 @@ class RenderCoordinator:
                 try:
                     data = self._json_body()
                     if route == "/api/join":
-                        result, status = coordinator.join(str(data.get("name") or "Worker"), str(data.get("hardware") or ""))
+                        result, status = coordinator.join(
+                            str(data.get("name") or "Worker"),
+                            str(data.get("hardware") or ""),
+                            bool(data.get("use_cpu", True)),
+                            bool(data.get("use_gpu", True)),
+                        )
                         self._send_json(result, status)
                     elif route == "/api/heartbeat":
                         self._send_json(coordinator.heartbeat(str(data.get("worker_id") or "")))
@@ -412,12 +467,18 @@ class RenderCoordinator:
         self.event(f"[NETWORK] Distributed render started: {start_frame}-{end_frame}")
         return self.plan
 
-    def join(self, name: str, hardware: str) -> tuple[dict[str, object], int]:
+    def join(self, name: str, hardware: str, use_cpu: bool = True, use_gpu: bool = True) -> tuple[dict[str, object], int]:
         with self._lock:
             online = [worker for worker in self.workers.values() if time.time() - worker.last_seen < 30]
             if len(online) >= MAX_WORKERS:
                 return {"ok": False, "error": f"Maximum {MAX_WORKERS} workers reached"}, 409
-            worker = WorkerState(uuid.uuid4().hex, name[:80] or "Worker", hardware[:200])
+            worker = WorkerState(
+                uuid.uuid4().hex,
+                name[:80] or "Worker",
+                hardware[:200],
+                use_cpu=bool(use_cpu),
+                use_gpu=bool(use_gpu),
+            )
             self.workers[worker.worker_id] = worker
         self.event(f"[NETWORK] Connected: {worker.name} ({worker.hardware or 'unknown hardware'})")
         return {"ok": True, "worker_id": worker.worker_id, "max_workers": MAX_WORKERS}, 200
@@ -470,6 +531,9 @@ class RenderCoordinator:
             "plan_id": plan.plan_id,
             "project_name": plan.blend_path.name,
             "samples": worker.samples,
+            "use_cpu": worker.use_cpu,
+            "use_gpu": worker.use_gpu,
+            "render_device": render_device_label(worker.use_cpu, worker.use_gpu),
         }
 
     def accept_result(self, data: dict[str, object]) -> dict[str, object]:
@@ -552,6 +616,8 @@ class RenderCoordinator:
         start_frame: int | None,
         end_frame: int | None,
         samples: int | None,
+        use_cpu: bool | None = None,
+        use_gpu: bool | None = None,
     ) -> bool:
         worker = self.workers.get(worker_id)
         if worker is None:
@@ -560,9 +626,15 @@ class RenderCoordinator:
             raise ValueError("start_frame cannot be greater than end_frame")
         if samples is not None and samples < 1:
             raise ValueError("samples must be greater than 0")
+        selected_cpu = worker.use_cpu if use_cpu is None else bool(use_cpu)
+        selected_gpu = worker.use_gpu if use_gpu is None else bool(use_gpu)
+        if not selected_cpu and not selected_gpu:
+            raise ValueError("At least CPU or GPU must be enabled")
         worker.frame_start = start_frame
         worker.frame_end = end_frame
         worker.samples = samples
+        worker.use_cpu = selected_cpu
+        worker.use_gpu = selected_gpu
         return True
 
     def set_worker_range(self, worker_id: str, start_frame: int | None, end_frame: int | None) -> bool:
@@ -593,6 +665,9 @@ class RenderCoordinator:
             "frame_start": None,
             "frame_end": None,
             "samples": None,
+            "use_cpu": True,
+            "use_gpu": True,
+            "render_device": "GPU + CPU",
             "is_controller": True,
             "settings_worker_id": "",
         }
@@ -631,6 +706,8 @@ class NetworkWorker:
         cache_folder: Path | None = None,
         on_event: Callable[[str], None] | None = None,
         render_frame: Callable[[int, Path], tuple[bool, Path | None, str]] | None = None,
+        use_cpu: bool = True,
+        use_gpu: bool = True,
     ) -> None:
         self.connection = PairingCode.decode(code)
         self.blender = blender
@@ -639,6 +716,8 @@ class NetworkWorker:
         self.cache_folder = cache_folder or Path(tempfile.gettempdir()) / "BlenderRenderWatchdogWorker"
         self.on_event = on_event
         self.render_frame = render_frame
+        self.use_cpu = bool(use_cpu)
+        self.use_gpu = bool(use_gpu)
         self.worker_id = ""
         self.stop_event = threading.Event()
         self._project_id = ""
@@ -657,7 +736,12 @@ class NetworkWorker:
         result = _request_json(
             self.base_url + "/api/join",
             self.connection.token,
-            {"name": self.name, "hardware": self.hardware},
+            {
+                "name": self.name,
+                "hardware": self.hardware,
+                "use_cpu": self.use_cpu,
+                "use_gpu": self.use_gpu,
+            },
         )
         if not result.get("ok"):
             raise ConnectionError(str(result.get("error") or "Connection refused"))
@@ -692,14 +776,43 @@ class NetworkWorker:
         self._project_path = destination
         return destination
 
-    def _render_frame(self, frame: int, project: Path, samples: int | None = None) -> tuple[bool, Path | None, str]:
+    def _render_frame(
+        self,
+        frame: int,
+        project: Path,
+        samples: int | None = None,
+        use_cpu: bool | None = None,
+        use_gpu: bool | None = None,
+    ) -> tuple[bool, Path | None, str]:
         frame_folder = self.cache_folder / "frames" / uuid.uuid4().hex
         frame_folder.mkdir(parents=True, exist_ok=True)
-        command = [str(self.blender), "-b", str(project), "-o", str(frame_folder / "frame_####")]
-        if samples is not None:
-            command.extend(["--python-expr", f"import bpy; bpy.context.scene.cycles.samples={samples}"])
+        device_script = frame_folder / "watchdog_worker_device.py"
+        device_script.write_text(
+            worker_device_script(
+                self.use_cpu if use_cpu is None else bool(use_cpu),
+                self.use_gpu if use_gpu is None else bool(use_gpu),
+                samples,
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            str(self.blender),
+            "-b",
+            str(project),
+            "-o",
+            str(frame_folder / "frame_####"),
+            "--python",
+            str(device_script),
+        ]
         command.extend(["-f", str(frame)])
-        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
         candidates = [path for path in frame_folder.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
         output = max(candidates, key=lambda path: path.stat().st_mtime, default=None)
         error = (completed.stdout + completed.stderr)[-2000:]
@@ -725,11 +838,19 @@ class NetworkWorker:
                         self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
                     frame = int(task["frame"])
                     samples = int(task["samples"]) if task.get("samples") is not None else None
+                    self.use_cpu = bool(task.get("use_cpu", self.use_cpu))
+                    self.use_gpu = bool(task.get("use_gpu", self.use_gpu))
                     self.event(f"[NETWORK] Rendering frame {frame}")
                     if self.render_frame:
                         success, output, error = self.render_frame(frame, self._project_path)
                     else:
-                        success, output, error = self._render_frame(frame, self._project_path, samples)
+                        success, output, error = self._render_frame(
+                            frame,
+                            self._project_path,
+                            samples,
+                            self.use_cpu,
+                            self.use_gpu,
+                        )
                     result: dict[str, object] = {
                         "worker_id": self.worker_id,
                         "frame": frame,

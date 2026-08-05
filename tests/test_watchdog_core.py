@@ -7,8 +7,8 @@ from blender_render_watchdog import APP_VERSION, build_blender_command, find_las
 
 
 class ReleaseVersionTests(unittest.TestCase):
-    def test_release_version_is_241(self) -> None:
-        self.assertEqual(APP_VERSION, "2.4.1")
+    def test_release_version_is_242(self) -> None:
+        self.assertEqual(APP_VERSION, "2.4.2")
 
 
 class BackgroundProcessTests(unittest.TestCase):
