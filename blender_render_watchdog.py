@@ -2366,7 +2366,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.install_update_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
             self.publish_github_button = ttk_module.Button(action_row, text="Publish to GitHub", command=self.publish_to_github)
             self.publish_github_button.grid(row=0, column=2, sticky="w", padx=(10, 0))
-            ttk_module.Label(action_row, textvariable=self.update_status_var, style="CardHint.TLabel").grid(row=0, column=3, sticky="e")
+            ttk_module.Label(action_row, textvariable=self.update_status_var, style="CardHint.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
             power_card = self.make_card(parent, ttk_module, row=0, column=1, sticky="nsew", padx=(12, 0))
             power_card.columnconfigure(0, weight=1)
@@ -2448,7 +2448,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 privacy_card,
                 text="Choose fresh codes for every start or keep your own key for stable LAN access.",
                 style="CardHint.TLabel",
-                wraplength=300,
+                wraplength=580,
                 justify="left",
             ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
             access_mode_row = ttk_module.Frame(privacy_card, style="Surface.TFrame")
@@ -2464,34 +2464,27 @@ def run_gui(args: argparse.Namespace) -> int:
             )
             self.access_mode_combo.grid(row=0, column=1, sticky="ew")
             self.access_mode_combo.bind("<<ComboboxSelected>>", self.change_access_mode)
-            ttk_module.Label(privacy_card, text="Your access key", style="Field.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 4))
-            ttk_module.Entry(privacy_card, textvariable=self.access_key_var).grid(row=4, column=0, sticky="ew")
-            access_buttons = ttk_module.Frame(privacy_card, style="Surface.TFrame")
-            access_buttons.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-            ttk_module.Button(access_buttons, text="Apply access", command=self.apply_access_settings).grid(row=0, column=0, sticky="w")
-            ttk_module.Button(access_buttons, text="New key", command=self.create_new_access_key).grid(row=0, column=1, sticky="w", padx=(8, 0))
-            ttk_module.Label(privacy_card, text="Startup recovery", style="CardTitle.TLabel").grid(row=6, column=0, sticky="w", pady=(18, 0))
-            ttk_module.Label(
-                privacy_card,
-                text="If Windows restarts before a render finishes, create a temporary Startup file and continue at the next login.",
-                style="CardHint.TLabel",
-                wraplength=300,
-                justify="left",
-            ).grid(row=7, column=0, sticky="ew", pady=(8, 8))
+            ttk_module.Button(access_mode_row, text="Apply access", command=self.apply_access_settings).grid(row=0, column=2, sticky="e", padx=(8, 0))
+            access_key_row = ttk_module.Frame(privacy_card, style="Surface.TFrame")
+            access_key_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            access_key_row.columnconfigure(1, weight=1)
+            ttk_module.Label(access_key_row, text="Your access key", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+            ttk_module.Entry(access_key_row, textvariable=self.access_key_var).grid(row=0, column=1, sticky="ew")
+            ttk_module.Button(access_key_row, text="New key", command=self.create_new_access_key).grid(row=0, column=2, sticky="e", padx=(8, 0))
             ttk_module.Checkbutton(
                 privacy_card,
-                text="Resume unfinished render at Windows login",
+                text="Resume after restart",
                 variable=self.resume_unfinished_var,
                 command=self.on_resume_unfinished_toggle,
                 style="Modern.TCheckbutton",
-            ).grid(row=8, column=0, sticky="w")
+            ).grid(row=4, column=0, sticky="w", pady=(12, 0))
             ttk_module.Label(
                 privacy_card,
                 textvariable=self.resume_status_var,
                 style="CardHint.TLabel",
-                wraplength=300,
+                wraplength=580,
                 justify="left",
-            ).grid(row=9, column=0, sticky="ew", pady=(8, 0))
+            ).grid(row=5, column=0, sticky="ew", pady=(6, 0))
         def add_optimization_check(self, parent, ttk_module, row: int, variable: tk.BooleanVar, title: str, hint: str) -> None:
             ttk_module.Checkbutton(parent, text=title, variable=variable, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=row, column=0, sticky="w", pady=6)
             ttk_module.Label(parent, text=hint, style="CardHint.TLabel").grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
