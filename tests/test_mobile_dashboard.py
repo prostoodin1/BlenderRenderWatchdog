@@ -6,8 +6,8 @@ from mobile_dashboard import DASHBOARD_HTML, MobileDashboardServer
 
 
 class MobileDashboardTests(unittest.TestCase):
-    def test_dashboard_uses_the_24_glass_theme(self) -> None:
-        self.assertIn("BLENDER RENDER WATCHDOG 2.4", DASHBOARD_HTML)
+    def test_dashboard_uses_the_241_glass_theme(self) -> None:
+        self.assertIn("BLENDER RENDER WATCHDOG 2.4.1", DASHBOARD_HTML)
         self.assertIn("border-radius:28px", DASHBOARD_HTML)
         self.assertIn("prefers-reduced-motion:reduce", DASHBOARD_HTML)
 
@@ -16,6 +16,7 @@ class MobileDashboardTests(unittest.TestCase):
         server = MobileDashboardServer(
             state_provider=lambda: {"status": "running", "progress": 42},
             action_handler=lambda action: (actions.append(action) is None, "queued"),
+            history_provider=lambda: [{"project_path": "scene.blend", "status": "complete"}],
             bind_host="127.0.0.1",
             advertised_host="127.0.0.1",
         )
@@ -24,6 +25,8 @@ class MobileDashboardTests(unittest.TestCase):
             base = f"http://127.0.0.1:{server.port}"
             with urllib.request.urlopen(base + f"/api/state?token={server.token}") as response:
                 state = json.loads(response.read())
+            with urllib.request.urlopen(base + f"/api/history?token={server.token}") as response:
+                history = json.loads(response.read())
             request = urllib.request.Request(
                 base + f"/api/action?token={server.token}",
                 data=json.dumps({"action": "pause"}).encode(),
@@ -32,6 +35,7 @@ class MobileDashboardTests(unittest.TestCase):
             with urllib.request.urlopen(request) as response:
                 result = json.loads(response.read())
             self.assertEqual(state["progress"], 42)
+            self.assertEqual(history["history"][0]["project_path"], "scene.blend")
             self.assertTrue(result["ok"])
             self.assertEqual(actions, ["pause"])
         finally:

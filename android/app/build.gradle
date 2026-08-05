@@ -1,0 +1,23 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.github.prostoodin1.blenderwatchdog"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.prostoodin1.blenderwatchdog"
+        minSdk 26
+        targetSdk 35
+        versionCode 241
+        versionName "2.4.1"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+        }
+    }
+}

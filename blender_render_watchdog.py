@@ -23,6 +23,14 @@ import threading
 import time
 from pathlib import Path
 
+from access_codes import (
+    ACCESS_MODE_PERSISTENT,
+    MobileSyncCode,
+    generate_access_key,
+    normalize_access_mode,
+    resolve_service_access,
+    validate_access_key,
+)
 from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
 from appearance import THEME_LABELS, build_palette, normalize_color, normalize_theme
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
@@ -74,7 +82,7 @@ QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1367,10 +1375,16 @@ def run_gui(args: argparse.Namespace) -> int:
             self.shutdown_after_render_var = tk.BooleanVar(value=(self.config.get("shutdown_after_render", "0") == "1"))
             self.mobile_enabled_var = tk.BooleanVar(value=(self.config.get("mobile_enabled", "0") == "1"))
             self.mobile_url_var = tk.StringVar()
+            self.mobile_sync_code_var = tk.StringVar()
+            self.access_mode = normalize_access_mode(self.config.get("access_mode"))
+            self.access_mode_var = tk.StringVar()
+            self.access_key_var = tk.StringVar(value=self.config.get("access_key") or generate_access_key())
             self.prediction_var = tk.StringVar()
             self.memory_prediction_var = tk.StringVar()
             self.autofix_var = tk.StringVar()
             self.set_localized(self.mobile_url_var, "Mobile dashboard is stopped")
+            self.set_localized(self.mobile_sync_code_var, "Start the mobile service to create a sync code")
+            self.update_access_mode_label()
             self.set_localized(self.prediction_var, "Select a project and run Analyze")
             self.set_localized(self.memory_prediction_var, "Memory: —")
             self.set_localized(self.autofix_var, "Preflight has not been run")
@@ -1482,10 +1496,27 @@ def run_gui(args: argparse.Namespace) -> int:
             self.update_theme_label()
             if hasattr(self, "theme_combo"):
                 self.theme_combo.configure(values=self.localized_theme_labels())
+            self.update_access_mode_label()
+            if hasattr(self, "access_mode_combo"):
+                self.access_mode_combo.configure(values=self.localized_access_mode_labels())
             self.save_current_config()
 
         def localized_theme_labels(self) -> tuple[str, ...]:
             return tuple(self.tr(label) for label in THEME_LABELS.values())
+
+        def localized_access_mode_labels(self) -> tuple[str, ...]:
+            return (self.tr("New every start"), self.tr("Keep on this network"))
+
+        def update_access_mode_label(self) -> None:
+            label = "Keep on this network" if self.access_mode == ACCESS_MODE_PERSISTENT else "New every start"
+            self.access_mode_var.set(self.tr(label))
+
+        def change_access_mode(self, _event=None) -> None:
+            selected = self.access_mode_var.get().strip().casefold()
+            persistent_labels = {"keep on this network".casefold(), self.tr("Keep on this network").casefold()}
+            self.access_mode = ACCESS_MODE_PERSISTENT if selected in persistent_labels else "rotate"
+            self.update_access_mode_label()
+            self.save_current_config()
 
         def update_theme_label(self) -> None:
             self.theme_var.set(self.tr(THEME_LABELS[self.theme_code]))
@@ -2335,7 +2366,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.install_update_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
             self.publish_github_button = ttk_module.Button(action_row, text="Publish to GitHub", command=self.publish_to_github)
             self.publish_github_button.grid(row=0, column=2, sticky="w", padx=(10, 0))
-            ttk_module.Label(action_row, textvariable=self.update_status_var, style="CardHint.TLabel").grid(row=0, column=3, sticky="e")
+            ttk_module.Label(action_row, textvariable=self.update_status_var, style="CardHint.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
             power_card = self.make_card(parent, ttk_module, row=0, column=1, sticky="nsew", padx=(12, 0))
             power_card.columnconfigure(0, weight=1)
@@ -2406,38 +2437,54 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Checkbutton(mobile_card, text="Start with the app", variable=self.mobile_enabled_var, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=3, column=0, sticky="w", pady=(10, 0))
             ttk_module.Button(mobile_card, text="Start", command=self.start_mobile_dashboard).grid(row=3, column=1, sticky="e", pady=(10, 0))
             ttk_module.Button(mobile_card, text="Copy link", command=self.copy_mobile_url).grid(row=3, column=2, sticky="e", padx=(8, 0), pady=(10, 0))
+            ttk_module.Label(mobile_card, text="Android sync code", style="Field.TLabel").grid(row=4, column=0, sticky="w", pady=(12, 6))
+            ttk_module.Entry(mobile_card, textvariable=self.mobile_sync_code_var, state="readonly").grid(row=5, column=0, columnspan=2, sticky="ew")
+            ttk_module.Button(mobile_card, text="Copy sync code", command=self.copy_mobile_sync_code).grid(row=5, column=2, sticky="e", padx=(8, 0))
 
             privacy_card = self.make_card(parent, ttk_module, row=1, column=1, sticky="nsew", padx=(12, 0), pady=(14, 0))
+            privacy_card.columnconfigure(0, weight=1)
             ttk_module.Label(privacy_card, text="LAN security", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(
                 privacy_card,
-                text="Network and mobile links use random access tokens. Share them only with devices on networks you trust.",
+                text="Choose fresh codes for every start or keep your own key for stable LAN access.",
                 style="CardHint.TLabel",
-                wraplength=300,
+                wraplength=580,
                 justify="left",
             ).grid(row=1, column=0, sticky="ew", pady=(8, 0))
-            ttk_module.Label(privacy_card, text="Startup recovery", style="CardTitle.TLabel").grid(row=2, column=0, sticky="w", pady=(24, 0))
-            ttk_module.Label(
-                privacy_card,
-                text="If Windows restarts before a render finishes, create a temporary Startup file and continue at the next login.",
-                style="CardHint.TLabel",
-                wraplength=300,
-                justify="left",
-            ).grid(row=3, column=0, sticky="ew", pady=(8, 8))
+            access_mode_row = ttk_module.Frame(privacy_card, style="Surface.TFrame")
+            access_mode_row.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+            access_mode_row.columnconfigure(1, weight=1)
+            ttk_module.Label(access_mode_row, text="Code behaviour", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+            self.access_mode_combo = ttk_module.Combobox(
+                access_mode_row,
+                textvariable=self.access_mode_var,
+                values=self.localized_access_mode_labels(),
+                state="readonly",
+                width=18,
+            )
+            self.access_mode_combo.grid(row=0, column=1, sticky="ew")
+            self.access_mode_combo.bind("<<ComboboxSelected>>", self.change_access_mode)
+            ttk_module.Button(access_mode_row, text="Apply access", command=self.apply_access_settings).grid(row=0, column=2, sticky="e", padx=(8, 0))
+            access_key_row = ttk_module.Frame(privacy_card, style="Surface.TFrame")
+            access_key_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            access_key_row.columnconfigure(1, weight=1)
+            ttk_module.Label(access_key_row, text="Your access key", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+            ttk_module.Entry(access_key_row, textvariable=self.access_key_var).grid(row=0, column=1, sticky="ew")
+            ttk_module.Button(access_key_row, text="New key", command=self.create_new_access_key).grid(row=0, column=2, sticky="e", padx=(8, 0))
             ttk_module.Checkbutton(
                 privacy_card,
-                text="Resume unfinished render at Windows login",
+                text="Resume after restart",
                 variable=self.resume_unfinished_var,
                 command=self.on_resume_unfinished_toggle,
                 style="Modern.TCheckbutton",
-            ).grid(row=4, column=0, sticky="w")
+            ).grid(row=4, column=0, sticky="w", pady=(12, 0))
             ttk_module.Label(
                 privacy_card,
                 textvariable=self.resume_status_var,
                 style="CardHint.TLabel",
-                wraplength=300,
+                wraplength=580,
                 justify="left",
-            ).grid(row=5, column=0, sticky="ew", pady=(8, 0))
+            ).grid(row=5, column=0, sticky="ew", pady=(6, 0))
         def add_optimization_check(self, parent, ttk_module, row: int, variable: tk.BooleanVar, title: str, hint: str) -> None:
             ttk_module.Checkbutton(parent, text=title, variable=variable, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=row, column=0, sticky="w", pady=6)
             ttk_module.Label(parent, text=hint, style="CardHint.TLabel").grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
@@ -2772,6 +2819,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_range_mode_var,
                 self.network_manual_start_var,
                 self.network_manual_end_var,
+                self.access_key_var,
             ]
             for variable in variables:
                 variable.trace_add("write", lambda *_: self.schedule_config_save())
@@ -2827,6 +2875,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     "network_range_mode": self.network_range_mode_var.get(),
                     "network_manual_start": self.network_manual_start_var.get().strip(),
                     "network_manual_end": self.network_manual_end_var.get().strip(),
+                    "access_mode": self.access_mode,
+                    "access_key": self.access_key_var.get().strip(),
                 }
             )
 
@@ -3200,7 +3250,14 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_code_var.set(self.network_controller.pairing_code)
                 return
             try:
+                access = resolve_service_access(
+                    self.access_mode,
+                    self.access_key_var.get(),
+                    "network",
+                )
                 self.network_controller = RenderCoordinator(
+                    port=access.port,
+                    token=access.token,
                     controller_name=self.controller_name_var.get().strip() or platform.node(),
                     controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     on_event=lambda message: self.log_queue.put(message),
@@ -3558,16 +3615,35 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.set_raw(self.mobile_url_var, self.mobile_dashboard.public_url)
                 return
             try:
+                access = resolve_service_access(
+                    self.access_mode,
+                    self.access_key_var.get(),
+                    "mobile",
+                )
                 self.mobile_dashboard = MobileDashboardServer(
                     state_provider=self.mobile_state_provider,
                     action_handler=self.mobile_action_handler,
                     preview_provider=lambda: self.latest_frame_path,
+                    history_provider=lambda: [record.to_dict() for record in self.render_history.recent(50)],
+                    port=access.port,
+                    token=access.token,
                 )
                 self.set_raw(self.mobile_url_var, self.mobile_dashboard.start())
+                self.set_raw(
+                    self.mobile_sync_code_var,
+                    MobileSyncCode(
+                        host=self.mobile_dashboard.advertised_host,
+                        port=self.mobile_dashboard.port,
+                        token=self.mobile_dashboard.token,
+                        name=self.controller_name_var.get().strip() or platform.node() or "Blender PC",
+                        version=APP_VERSION,
+                    ).encode(),
+                )
                 self.log(f"[MOBILE] Dashboard: {self.mobile_url_var.get()}")
             except Exception as error:
                 self.mobile_dashboard = None
                 self.set_localized(self.mobile_url_var, "Could not start: {error}", error=error)
+                self.set_localized(self.mobile_sync_code_var, "Start the mobile service to create a sync code")
 
         def copy_mobile_url(self) -> None:
             value = self.mobile_url_var.get()
@@ -3575,12 +3651,43 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(value)
 
+        def copy_mobile_sync_code(self) -> None:
+            value = self.mobile_sync_code_var.get().strip()
+            if value.startswith("BRWM1-"):
+                self.root.clipboard_clear()
+                self.root.clipboard_append(value)
+
+        def create_new_access_key(self) -> None:
+            self.access_key_var.set(generate_access_key())
+            self.apply_access_settings()
+
+        def apply_access_settings(self) -> None:
+            self.change_access_mode()
+            if self.access_mode == ACCESS_MODE_PERSISTENT:
+                try:
+                    validate_access_key(self.access_key_var.get())
+                except ValueError as error:
+                    messagebox.showerror(self.tr("LAN security"), str(error))
+                    return
+            self.save_current_config()
+            if self.mobile_dashboard:
+                self.mobile_dashboard.stop()
+                self.mobile_dashboard = None
+                self.start_mobile_dashboard()
+            if self.network_controller and self.network_controller.plan is None:
+                self.stop_network_controller()
+                self.start_network_controller()
+            elif self.network_controller:
+                self.log("[NETWORK] Access changes will apply after the active network render stops.")
+
         def refresh_mobile_state_cache(self) -> None:
             queue_text = ", ".join(f"{job.project_name}: {job.status}" for job in self.render_queue.jobs[:8])
             workers = 0
             if self.network_controller:
                 workers = sum(time.time() - worker.last_seen < 30 for worker in self.network_controller.workers.values())
             self.mobile_state_cache = {
+                "device_name": self.controller_name_var.get().strip() or platform.node() or "Blender PC",
+                "version": APP_VERSION,
                 "project": Path(self.blend_var.get().strip().strip('"')).name or "Waiting for render",
                 "status": self.status_var.get(),
                 "detail": self.status_detail_var.get(),

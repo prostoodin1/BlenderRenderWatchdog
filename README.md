@@ -1,10 +1,10 @@
-# Blender Render Watchdog 2.4
+# Blender Render Watchdog 2.4.1
 
-> В версии 2.4 добавлены безопасное автопродолжение незаконченного рендера после входа в Windows, отключение рабочих устройств с главного ПК, семь цветовых тем и собственный accent-цвет. Быстрые переходы теперь включены по умолчанию.
+> В версии 2.4.1 добавлены нативное Android-приложение, сохранённые компьютеры и выбор между новыми или постоянными кодами доступа в локальной сети.
 
-![Blender Render Watchdog 2.4 — главный экран](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Dashboard.png)
+![Blender Render Watchdog 2.4.1 — главный экран](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.1/BlenderRenderWatchdog-2.4.1-Dashboard.png)
 
-![Blender Render Watchdog 2.4 — темы и восстановление](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.0/BlenderRenderWatchdog-2.4-Settings.png)
+![Blender Render Watchdog 2.4.1 — коды доступа и Android](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.1/BlenderRenderWatchdog-2.4.1-Settings.png)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -54,6 +54,8 @@ Windows-приложение для надёжного фонового ренд
 2. При необходимости откройте Insights и нажмите **Analyze scene**.
 3. Нажмите **Start render** или добавьте проект в Queue.
 
+Для телефона скачайте из того же релиза `BlenderRenderWatchdog-Android.apk`. На ПК откройте **Settings**, запустите **Mobile dashboard**, скопируйте **Android sync code** и добавьте его на вкладке «Устройства» телефона.
+
 ## Видео
 
 В Advanced выберите `video` либо включите **Compose frames after render**. Watchdog сначала создаёт восстанавливаемую последовательность кадров, затем запускает FFmpeg. Такой порядок не теряет весь ролик при падении Blender.
@@ -86,7 +88,9 @@ BlenderRenderWatchdog.exe --worker-code BRW2-... --blender "C:\Program Files\Ble
 
 ## Мобильная панель
 
-В Settings запустите Mobile dashboard и откройте показанную ссылку на телефоне в той же локальной сети. Ссылка содержит секретный токен — не публикуйте её. Панель можно добавить на домашний экран как web-приложение.
+В Settings выберите, должны ли коды обновляться при каждом запуске или оставаться постоянными в текущей LAN. В постоянном режиме можно задать собственный ключ; кнопка **New key** отзывает старый доступ.
+
+Запустите Mobile dashboard и вставьте показанный код `BRWM1` в Android-приложение. Телефон сохраняет несколько компьютеров, показывает их прогресс и историю и позволяет отправить паузу или остановку. Web-панель по приватной ссылке также остаётся доступна.
 
 ## Render Sandbox
 

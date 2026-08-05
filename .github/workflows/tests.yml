@@ -9,11 +9,11 @@ jobs:
   unit-tests:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Compile sources
-        run: python -m py_compile blender_render_watchdog.py appearance.py auto_fix.py glass_ui.py localization.py mobile_dashboard.py network_render.py render_analytics.py render_queue.py resume_startup.py render_sandbox.py video_tools.py
+        run: python -m py_compile blender_render_watchdog.py access_codes.py appearance.py auto_fix.py glass_ui.py localization.py mobile_dashboard.py network_render.py render_analytics.py render_queue.py resume_startup.py render_sandbox.py video_tools.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

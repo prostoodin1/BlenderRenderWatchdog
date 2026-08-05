@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.4.1 — 2026-08-05
+
+### Stable or rotating access
+
+- Added a choice between a fresh code/link on every service start and persistent LAN credentials.
+- Added an editable access key and one-click key regeneration; changing it revokes old mobile access.
+- Kept network-render and mobile tokens separate even when they come from the same saved key.
+
+### Native Android app
+
+- Added an installable Android APK with matte Liquid Glass styling and bottom Devices, History and Settings tabs.
+- Added BRWM1 sync codes, locally saved computers, background status refresh and optional device removal.
+- Added remote pause/resume and stop controls plus recent render history from every saved computer.
+- Added English and Russian Android resources.
+
+### Engineering
+
+- Added an authenticated mobile history endpoint and shared sync-code tests.
+- Added a dedicated GitHub Actions APK build and expanded the suite to 59 tests.
+- Kept protocol, Android app, UI layout and release work in separate commits.
+
 ## 2.4.0 — 2026-08-03
 
 ### Unfinished-render startup recovery
