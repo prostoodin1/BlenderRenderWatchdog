@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.4.2 — 2026-08-05
+
+### Device render controls
+
+- Open a matte-glass settings dialog by selecting a connected render worker on the main PC.
+- Choose CPU, GPU or combined rendering, override Samples and assign a manual frame range per device.
+- Return to automatic balancing or disconnect the selected worker without losing its active frame.
+
+### Quieter Windows rendering
+
+- Launch local Blender renders, distributed frames, project packing, FFmpeg and helper tools without flashing CMD windows.
+- Reuse one tested Windows process helper across every background subprocess.
+
+### Lighter Android interface
+
+- Replaced the heavy rectangular bottom bar with a floating matte-glass cloud navigation surface.
+- Added lightweight animated tab pills, softer cards and a calmer multi-tone background.
+- Updated the native app and LAN protocol versions to 2.4.2.
+
+### Engineering
+
+- Expanded the suite to 63 tests, including render-device configuration and hidden Windows processes.
+- Kept existing persistent access codes compatible with 2.4.1 installations.
+
 ## 2.4.1 — 2026-08-05
 
 ### Stable or rotating access
