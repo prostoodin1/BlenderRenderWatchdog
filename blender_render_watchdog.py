@@ -37,6 +37,7 @@ from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from mobile_dashboard import MobileDashboardServer
 from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator, prepare_network_project
+from process_utils import hidden_subprocess_kwargs
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
 from resume_startup import (
@@ -82,7 +83,7 @@ QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -131,12 +132,6 @@ def save_config(config: dict[str, str]) -> None:
     )
 
 
-def hidden_subprocess_kwargs(platform_name: str | None = None) -> dict[str, int]:
-    """Prevent background console tools from flashing a terminal on Windows."""
-    if (platform_name or os.name) != "nt":
-        return {}
-    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
-
 def send_notification(title: str, message: str) -> None:
     if os.name != "nt":
         return
@@ -160,6 +155,7 @@ $notify.Dispose()
             ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
         )
     except Exception:
         pass
@@ -345,6 +341,7 @@ def query_frame_range(blender: Path, blend: Path, log: callable | None = None) -
             encoding="utf-8",
             errors="replace",
             timeout=90,
+            **hidden_subprocess_kwargs(),
         )
     except Exception as error:
         if log:
@@ -571,6 +568,7 @@ Start-Process -FilePath $Target
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **hidden_subprocess_kwargs(),
     )
 
 
@@ -589,6 +587,7 @@ def schedule_system_shutdown(seconds: int = 60) -> None:
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            **hidden_subprocess_kwargs(),
         )
     except Exception:
         pass
@@ -879,6 +878,7 @@ print("WATCHDOG_SCENE_SETTINGS:" + json.dumps({
             encoding="utf-8",
             errors="replace",
             timeout=90,
+            **hidden_subprocess_kwargs(),
         )
     except Exception as error:
         if log:
@@ -1077,6 +1077,7 @@ def run_blender_process(
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        **hidden_subprocess_kwargs(),
     )
     output_thread = threading.Thread(target=read_output, daemon=True)
     output_thread.start()
@@ -1304,6 +1305,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.render_history = RenderHistory.load(HISTORY_PATH)
             self.network_controller: RenderCoordinator | None = None
             self.network_worker: NetworkWorker | None = None
+            self.network_device_dialog = None
             self.mobile_dashboard: MobileDashboardServer | None = None
             self.network_session: RenderSession | None = None
             self.network_history_saved = False
@@ -2105,29 +2107,11 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_tree.column(column, width=widths[column], anchor="center" if column in {"state", "current", "done", "average", "samples", "range"} else "w")
             self.network_tree.grid(row=1, column=0, sticky="nsew")
             self.network_tree.bind("<<TreeviewSelect>>", self.on_network_device_selected)
-            allocation = ttk_module.Frame(nodes_card, style="Surface.TFrame")
-            allocation.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-            ttk_module.Label(allocation, text="Manual allocation", style="Field.TLabel").grid(row=0, column=0, sticky="w")
-            ttk_module.Entry(allocation, textvariable=self.worker_range_start_var, width=9).grid(row=0, column=1, padx=(10, 4))
-            ttk_module.Label(allocation, text="to", style="CardHint.TLabel").grid(row=0, column=2)
-            ttk_module.Entry(allocation, textvariable=self.worker_range_end_var, width=9).grid(row=0, column=3, padx=(4, 10))
-            ttk_module.Button(allocation, text="Apply", command=self.apply_network_allocation).grid(row=0, column=4)
-            ttk_module.Label(allocation, text="Leave empty for automatic balancing", style="CardHint.TLabel").grid(row=0, column=5, sticky="w", padx=(10, 0))
-            ttk_module.Label(allocation, text="Samples", style="Field.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
-            ttk_module.Entry(allocation, textvariable=self.worker_samples_var, width=9).grid(row=1, column=1, padx=(10, 4), pady=(8, 0))
-            ttk_module.Button(allocation, text="Automatic frames", command=self.set_selected_worker_auto).grid(row=1, column=2, columnspan=2, pady=(8, 0))
-            ttk_module.Label(allocation, text="Empty Samples uses the scene setting", style="CardHint.TLabel").grid(row=1, column=4, columnspan=2, sticky="w", padx=(10, 0), pady=(8, 0))
-            ttk_module.Button(
-                allocation,
-                text="Disconnect selected device",
-                style="Danger.TButton",
-                command=self.disconnect_selected_network_device,
-            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
             ttk_module.Label(
-                allocation,
-                text="Its active frame returns to the queue",
+                nodes_card,
+                text="Select a device to open its render settings",
                 style="CardHint.TLabel",
-            ).grid(row=2, column=3, columnspan=3, sticky="w", padx=(10, 0), pady=(10, 0))
+            ).grid(row=2, column=0, sticky="w", pady=(10, 0))
             self.root.after_idle(self.update_network_role_view)
             self.root.after_idle(self.update_network_range_mode_view)
 
@@ -3398,6 +3382,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     cache_folder=app_config_dir() / "network_worker",
                     on_event=lambda message: self.log_queue.put(message),
+                    use_cpu=self.use_cpu_var.get(),
+                    use_gpu=self.use_gpu_var.get(),
                 )
                 worker = self.network_worker
                 threading.Thread(target=self.run_network_worker, args=(worker,), daemon=True).start()
@@ -3457,6 +3443,125 @@ def run_gui(args: argparse.Namespace) -> int:
             self.worker_range_start_var.set("" if device.get("frame_start") is None else str(device["frame_start"]))
             self.worker_range_end_var.set("" if device.get("frame_end") is None else str(device["frame_end"]))
             self.worker_samples_var.set("" if device.get("samples") is None else str(device["samples"]))
+            item_id = str(selection[0])
+            if self.network_controller and self.network_device_worker_ids.get(item_id):
+                self.root.after_idle(lambda selected_item=item_id: self.show_network_device_settings(selected_item))
+
+        def show_network_device_settings(self, item_id: str) -> None:
+            device = self.network_device_rows.get(item_id, {})
+            if not device:
+                return
+            if self.network_device_dialog is not None:
+                try:
+                    self.network_device_dialog.destroy()
+                except tk.TclError:
+                    pass
+
+            dialog = tk.Toplevel(self.root)
+            self.network_device_dialog = dialog
+            dialog.title(self.tr("Device settings"))
+            dialog.geometry("650x610")
+            dialog.resizable(False, False)
+            dialog.configure(background=self.colors["bg"])
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            def close_dialog() -> None:
+                if self.network_device_dialog is dialog:
+                    self.network_device_dialog = None
+                dialog.destroy()
+
+            ui = GlassWidgetFactory(
+                ttk,
+                self.colors,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+            )
+            shell = GlassCard(
+                dialog,
+                palette=self.colors,
+                padding=22,
+                radius=28,
+                backdrop=self.colors["bg"],
+                effects_enabled=not self.lightweight_motion_var.get(),
+            )
+            shell.pack(fill="both", expand=True, padx=20, pady=20)
+            card = shell.content
+            card.columnconfigure(1, weight=1)
+
+            name = str(device.get("name") or self.tr("Device"))
+            ui.Label(card, text=name, style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+            ui.Label(
+                card,
+                text="Connected device render controls",
+                style="CardHint.TLabel",
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+
+            details = (
+                ("Status", self.tr("Online") if device.get("online", True) else self.tr("Offline")),
+                ("Render hardware", str(device.get("hardware") or "—")),
+                ("Current frame", str(device.get("current_frame") or "—")),
+                ("Completed frames", str(int(device.get("completed_frames") or 0))),
+                ("Average frame time", format_duration(float(device.get("average_seconds") or 0.0))),
+            )
+            row = 2
+            for label, value in details:
+                ui.Label(card, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="nw", pady=5)
+                ui.Label(card, text=value, style="CardHint.TLabel", wraplength=390, justify="left").grid(row=row, column=1, sticky="w", padx=(14, 0), pady=5)
+                row += 1
+
+            mode_var = tk.StringVar(value=str(device.get("render_device") or "GPU + CPU"))
+            start_var = tk.StringVar(value="" if device.get("frame_start") is None else str(device["frame_start"]))
+            end_var = tk.StringVar(value="" if device.get("frame_end") is None else str(device["frame_end"]))
+            samples_var = tk.StringVar(value="" if device.get("samples") is None else str(device["samples"]))
+
+            ui.Label(card, text="Render device", style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=(14, 5))
+            ui.Combobox(card, textvariable=mode_var, values=("GPU + CPU", "GPU", "CPU"), state="readonly").grid(row=row, column=1, sticky="ew", padx=(14, 0), pady=(14, 5))
+            row += 1
+
+            allocation = ui.Frame(card, style="Surface.TFrame")
+            allocation.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            ui.Label(allocation, text="Frame allocation", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Entry(allocation, textvariable=start_var, width=8).grid(row=0, column=1, padx=(12, 5))
+            ui.Label(allocation, text="to", style="CardHint.TLabel").grid(row=0, column=2)
+            ui.Entry(allocation, textvariable=end_var, width=8).grid(row=0, column=3, padx=(5, 16))
+            ui.Label(allocation, text="Samples", style="Field.TLabel").grid(row=0, column=4)
+            ui.Entry(allocation, textvariable=samples_var, width=8).grid(row=0, column=5, padx=(8, 0))
+            row += 1
+
+            def apply_dialog_settings(automatic: bool = False) -> None:
+                try:
+                    start = None if automatic or not start_var.get().strip() else int(start_var.get())
+                    end = None if automatic or not end_var.get().strip() else int(end_var.get())
+                    samples = int(samples_var.get()) if samples_var.get().strip() else None
+                    mode = mode_var.get()
+                    use_cpu = mode in {"CPU", "GPU + CPU"}
+                    use_gpu = mode in {"GPU", "GPU + CPU"}
+                    worker_id = self.network_device_worker_ids.get(item_id, "")
+                    if not self.network_controller or not worker_id:
+                        raise ValueError(self.tr("This device is not available for render settings."))
+                    if not self.network_controller.set_worker_settings(worker_id, start, end, samples, use_cpu, use_gpu):
+                        raise ValueError(self.tr("This device is not available for render settings."))
+                    self.set_localized(self.network_status_var, "Device render settings applied")
+                    self.refresh_network_state()
+                    close_dialog()
+                except ValueError as error:
+                    messagebox.showerror(self.tr("Device settings"), str(error), parent=dialog)
+
+            buttons = ui.Frame(card, style="Surface.TFrame")
+            buttons.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+            ui.Button(buttons, text="Apply settings", style="Primary.TButton", command=apply_dialog_settings).grid(row=0, column=0, sticky="w")
+            ui.Button(buttons, text="Automatic balancing", command=lambda: apply_dialog_settings(True)).grid(row=0, column=1, sticky="w", padx=(8, 0))
+            disconnect_button = ui.Button(
+                buttons,
+                text="Disconnect from main PC",
+                style="Danger.TButton",
+                command=lambda: (close_dialog(), self.disconnect_selected_network_device()),
+                state="disabled" if device.get("is_controller") else "normal",
+            )
+            disconnect_button.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+            dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
         def disconnect_selected_network_device(self) -> None:
             controller = self.network_controller

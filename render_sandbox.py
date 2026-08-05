@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from process_utils import hidden_subprocess_kwargs
+
 
 @dataclass(slots=True)
 class SandboxVariant:
@@ -101,6 +103,7 @@ def run_variant(
             text=True,
             encoding="utf-8",
             errors="replace",
+            **hidden_subprocess_kwargs(),
         )
         duration = time.monotonic() - started
         candidates = [path for path in variant_folder.glob("sandbox_*") if path.is_file() and path.resolve() not in before]

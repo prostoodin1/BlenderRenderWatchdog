@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from process_utils import hidden_subprocess_kwargs
+
 
 VIDEO_FORMATS = {
     "MP4 (H.264)": (".mp4", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]),
@@ -105,5 +107,6 @@ def compose_video(
         text=True,
         encoding="utf-8",
         errors="replace",
+        **hidden_subprocess_kwargs(),
     )
     return VideoResult(destination, completed.returncode, completed.stdout + completed.stderr)
