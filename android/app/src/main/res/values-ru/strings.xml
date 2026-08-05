@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Blender Watchdog</string>
+    <string name="eyebrow">BLENDER WATCHDOG 2.4.1</string>
+    <string name="devices">Устройства</string>
+    <string name="history">История</string>
+    <string name="settings">Настройки</string>
+    <string name="your_devices">Ваши устройства рендера</string>
+    <string name="devices_hint">Прогресс и управление компьютерами в этой Wi-Fi сети.</string>
+    <string name="sync_code">Код синхронизации с ПК</string>
+    <string name="paste">Вставить</string>
+    <string name="add_device">Добавить устройство</string>
+    <string name="refresh">Обновить</string>
+    <string name="no_devices">Устройств пока нет. Запустите мобильную панель на компьютере и вставьте сюда код BRWM1.</string>
+    <string name="invalid_code">Это некорректный код синхронизации BRWM1.</string>
+    <string name="online">В сети</string>
+    <string name="offline">Не в сети</string>
+    <string name="connecting">Подключение…</string>
+    <string name="progress">Прогресс</string>
+    <string name="pause">Пауза / продолжить</string>
+    <string name="stop">Остановить</string>
+    <string name="remove">Удалить</string>
+    <string name="remove_title">Удалить устройство?</string>
+    <string name="remove_message">Сохранённый код синхронизации будет удалён с телефона.</string>
+    <string name="cancel">Отмена</string>
+    <string name="command_sent">Команда отправлена</string>
+    <string name="render_history">История рендеров</string>
+    <string name="history_hint">Последние сессии со всех сохранённых компьютеров.</string>
+    <string name="no_history">История рендеров пока недоступна.</string>
+    <string name="loading_history">Загрузка истории…</string>
+    <string name="completed_frames">%1$d кадров · %2$s</string>
+    <string name="connection_settings">Настройки подключения</string>
+    <string name="settings_hint">Коды хранятся только на телефоне. Соединение идёт напрямую по локальной сети.</string>
+    <string name="refresh_interval">Интервал обновления</string>
+    <string name="two_seconds">2 секунды</string>
+    <string name="five_seconds">5 секунд</string>
+    <string name="ten_seconds">10 секунд</string>
+    <string name="saved_devices">Сохранено устройств: %1$d</string>
+    <string name="clear_devices">Удалить все устройства</string>
+    <string name="security_note">Код синхронизации равен паролю. Смените ключ доступа на ПК, чтобы отозвать все старые коды телефонов.</string>
+    <string name="about">Нативное Android-приложение · версия 2.4.1</string>
+</resources>

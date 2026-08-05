@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Blender Watchdog</string>
+    <string name="eyebrow">BLENDER WATCHDOG 2.4.1</string>
+    <string name="devices">Devices</string>
+    <string name="history">History</string>
+    <string name="settings">Settings</string>
+    <string name="your_devices">Your render devices</string>
+    <string name="devices_hint">Live progress and controls for computers on this Wi-Fi network.</string>
+    <string name="sync_code">Desktop sync code</string>
+    <string name="paste">Paste</string>
+    <string name="add_device">Add device</string>
+    <string name="refresh">Refresh</string>
+    <string name="no_devices">No devices yet. Start Mobile dashboard on a computer and paste its BRWM1 code here.</string>
+    <string name="invalid_code">This is not a valid BRWM1 sync code.</string>
+    <string name="online">Online</string>
+    <string name="offline">Offline</string>
+    <string name="connecting">Connecting…</string>
+    <string name="progress">Progress</string>
+    <string name="pause">Pause / resume</string>
+    <string name="stop">Stop</string>
+    <string name="remove">Remove</string>
+    <string name="remove_title">Remove device?</string>
+    <string name="remove_message">Its saved sync code will be deleted from this phone.</string>
+    <string name="cancel">Cancel</string>
+    <string name="command_sent">Command sent</string>
+    <string name="render_history">Render history</string>
+    <string name="history_hint">Recent sessions from every saved computer.</string>
+    <string name="no_history">No render history is available.</string>
+    <string name="loading_history">Loading history…</string>
+    <string name="completed_frames">%1$d frames · %2$s</string>
+    <string name="connection_settings">Connection settings</string>
+    <string name="settings_hint">Codes stay only on this phone. Communication is direct over your local network.</string>
+    <string name="refresh_interval">Refresh interval</string>
+    <string name="two_seconds">2 seconds</string>
+    <string name="five_seconds">5 seconds</string>
+    <string name="ten_seconds">10 seconds</string>
+    <string name="saved_devices">Saved devices: %1$d</string>
+    <string name="clear_devices">Remove all devices</string>
+    <string name="security_note">Treat a sync code like a password. Change the access key on the desktop to revoke every old phone code.</string>
+    <string name="about">Native Android client · version 2.4.1</string>
+</resources>
