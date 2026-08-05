@@ -28,6 +28,10 @@
 - Android `MainActivity.java`: **612 строк**;
 - тесты: **805 строк в 13 файлах**.
 
+SHA-256 `BlenderRenderWatchdog.exe`: `d8d2deb063dc9c6af3ee601f6ccf9c2f05fb381362627783e0c6ed07ec0c84fb`
+
+SHA-256 `BlenderRenderWatchdog-Android.apk`: `f795ab7b0531e996472b0b76e0d66f010522c34849cd9fca7ef67b4bc1eeeff1`
+
 ## Скриншоты
 
 ![Главный экран](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.4.1/BlenderRenderWatchdog-2.4.1-Dashboard.png)
