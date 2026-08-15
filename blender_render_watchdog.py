@@ -21,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from access_codes import (
@@ -36,7 +37,7 @@ from appearance import THEME_LABELS, build_palette, normalize_color, normalize_t
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from mobile_dashboard import MobileDashboardServer
-from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator, prepare_network_project
+from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator
 from process_utils import hidden_subprocess_kwargs
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
@@ -168,6 +169,23 @@ $notify.Dispose()
 
 
 
+def stable_hardware_snapshot(
+    previous_cpu: str,
+    previous_gpus: list[str],
+    detected_cpu: str,
+    detected_gpus: list[str],
+) -> tuple[str, list[str]]:
+    """Keep the last real hardware list when a transient Windows query fails."""
+    invalid_gpu_labels = {"", "No GPU detected by Windows"}
+    usable_gpus = [gpu.strip() for gpu in detected_gpus if gpu.strip() not in invalid_gpu_labels]
+    previous_usable = [gpu.strip() for gpu in previous_gpus if gpu.strip() not in invalid_gpu_labels]
+    cpu = detected_cpu.strip()
+    if not cpu or cpu == "Unknown CPU":
+        cpu = previous_cpu.strip() or "Unknown CPU"
+    gpus = usable_gpus or previous_usable or ["No GPU detected by Windows"]
+    return cpu, gpus
+
+
 def detect_hardware() -> tuple[str, list[str]]:
     cpu = platform.processor() or platform.machine() or "Unknown CPU"
     gpus: list[str] = []
@@ -178,7 +196,9 @@ def detect_hardware() -> tuple[str, list[str]]:
                 "powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                "$cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name; "
+                "$gpus = @(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name); "
+                "@{cpu=$cpu;gpus=$gpus} | ConvertTo-Json -Compress",
             ]
             completed = subprocess.run(
                 command,
@@ -190,7 +210,16 @@ def detect_hardware() -> tuple[str, list[str]]:
                 **hidden_subprocess_kwargs(),
             )
             if completed.returncode == 0:
-                gpus = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+                hardware = json.loads(completed.stdout.strip().lstrip("\ufeff"))
+                if isinstance(hardware, dict):
+                    detected_cpu = str(hardware.get("cpu") or "").strip()
+                    if detected_cpu:
+                        cpu = detected_cpu
+                    raw_gpus = hardware.get("gpus") or []
+                    if isinstance(raw_gpus, str):
+                        raw_gpus = [raw_gpus]
+                    if isinstance(raw_gpus, list):
+                        gpus = [str(item).strip() for item in raw_gpus if str(item).strip()]
         except Exception:
             gpus = []
 
@@ -396,7 +425,12 @@ def normalize_update_manifest(manifest: dict[str, object]) -> dict[str, object]:
         exe_url = DEFAULT_RELEASE_EXE_URL
 
     notes = str(manifest.get("notes") or manifest.get("body") or "").strip()
-    return {"version": version, "exe_url": exe_url, "notes": notes}
+    digest = str(manifest.get("sha256") or manifest.get("digest") or "").strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest.split(":", 1)[1]
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        digest = ""
+    return {"version": version, "exe_url": exe_url, "notes": notes, "sha256": digest}
 
 
 def fetch_github_release_manifest(repository: str) -> dict[str, object]:
@@ -411,18 +445,21 @@ def fetch_github_release_manifest(repository: str) -> dict[str, object]:
         raise ValueError("GitHub release response must be a JSON object.")
 
     exe_url = ""
+    exe_digest = ""
     for asset in release.get("assets") or []:
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name") or "").lower()
         if name == "blenderrenderwatchdog.exe" or name.endswith(".exe"):
             exe_url = str(asset.get("browser_download_url") or "")
+            exe_digest = str(asset.get("digest") or "")
             break
 
     return normalize_update_manifest(
         {
             "version": release.get("tag_name") or release.get("name") or "",
             "exe_url": exe_url,
+            "digest": exe_digest,
             "notes": release.get("body") or "",
         }
     )
@@ -529,6 +566,66 @@ def check_update_cli(update_source: str | None, install: bool) -> int:
     return 0
 
 
+def powershell_literal(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def build_update_script(
+    exe_url: str,
+    temp_exe: Path,
+    target: Path,
+    current_pid: int,
+    expected_sha256: str = "",
+) -> str:
+    target_directory = target.parent
+    backup = target.with_suffix(target.suffix + ".previous")
+    expected_sha256 = expected_sha256.lower() if re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) else ""
+    return f'''$ErrorActionPreference = "Stop"
+$Url = {powershell_literal(exe_url)}
+$TempExe = {powershell_literal(temp_exe)}
+$Target = {powershell_literal(target)}
+$TargetDirectory = {powershell_literal(target_directory)}
+$Backup = {powershell_literal(backup)}
+$ExpectedSha256 = {powershell_literal(expected_sha256)}
+$PidToWait = {int(current_pid)}
+Invoke-WebRequest -Uri $Url -OutFile $TempExe -UseBasicParsing
+if ((Get-Item -LiteralPath $TempExe).Length -lt 1000000) {{ throw "Downloaded executable is unexpectedly small" }}
+if ($ExpectedSha256) {{
+    $ActualSha256 = (Get-FileHash -LiteralPath $TempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualSha256 -ne $ExpectedSha256) {{ throw "Downloaded executable checksum does not match" }}
+}}
+for ($Attempt = 0; $Attempt -lt 90; $Attempt++) {{
+    if (-not (Get-Process -Id $PidToWait -ErrorAction SilentlyContinue)) {{ break }}
+    Start-Sleep -Seconds 1
+}}
+Start-Sleep -Seconds 3
+if (Test-Path -LiteralPath $Backup) {{ Remove-Item -LiteralPath $Backup -Force }}
+Copy-Item -LiteralPath $Target -Destination $Backup -Force
+$Installed = $false
+for ($Attempt = 0; $Attempt -lt 30; $Attempt++) {{
+    try {{
+        Move-Item -LiteralPath $TempExe -Destination $Target -Force
+        $Installed = $true
+        break
+    }} catch {{
+        Start-Sleep -Seconds 1
+    }}
+}}
+if (-not $Installed) {{ throw "Could not replace the running executable" }}
+Start-Sleep -Seconds 4
+$env:PYINSTALLER_RESET_ENVIRONMENT = "1"
+$Started = Start-Process -FilePath $Target -WorkingDirectory $TargetDirectory -PassThru
+Start-Sleep -Seconds 6
+if ($Started.HasExited) {{
+    Copy-Item -LiteralPath $Backup -Destination $Target -Force
+    Start-Process -FilePath $Target -WorkingDirectory $TargetDirectory
+    throw "Updated app failed to start; the previous version was restored"
+}}
+Remove-Item -LiteralPath $Backup -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+'''
+
+
 def install_update_from_manifest(manifest: dict[str, object]) -> None:
     if not getattr(sys, "frozen", False):
         raise RuntimeError("Auto-install updates is available only in the exe build.")
@@ -538,24 +635,17 @@ def install_update_from_manifest(manifest: dict[str, object]) -> None:
         raise ValueError("Update manifest does not contain exe_url.")
 
     target = app_target_path()
-    temp_exe = Path(tempfile.gettempdir()) / "BlenderRenderWatchdog_update.exe"
-    updater_script = Path(tempfile.gettempdir()) / "BlenderRenderWatchdog_apply_update.ps1"
+    update_id = uuid.uuid4().hex
+    temp_exe = Path(tempfile.gettempdir()) / f"BlenderRenderWatchdog_update_{update_id}.exe"
+    updater_script = Path(tempfile.gettempdir()) / f"BlenderRenderWatchdog_apply_update_{update_id}.ps1"
     current_pid = os.getpid()
-
-    script = f'''
-$ErrorActionPreference = "Stop"
-$Url = {exe_url!r}
-$TempExe = {str(temp_exe)!r}
-$Target = {str(target)!r}
-$PidToWait = {current_pid}
-Write-Host "Downloading update..."
-Invoke-WebRequest -Uri $Url -OutFile $TempExe -UseBasicParsing
-Write-Host "Waiting for app to close..."
-try {{ Wait-Process -Id $PidToWait -Timeout 60 }} catch {{ }}
-Start-Sleep -Seconds 2
-Copy-Item -LiteralPath $TempExe -Destination $Target -Force
-Start-Process -FilePath $Target
-'''
+    script = build_update_script(
+        exe_url,
+        temp_exe,
+        target,
+        current_pid,
+        str(manifest.get("sha256") or ""),
+    )
     updater_script.write_text(script, encoding="utf-8")
     subprocess.Popen(
         [
@@ -1318,6 +1408,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.card_reveal_index = 0
             self.progress_animation_id: str | None = None
             self.progress_animation_target = 0.0
+            self.tab_scroll_canvases: list[object] = []
+            self.current_render_frame: int | None = None
+            self.render_frame_count = 0
+            self.render_average_seconds = 0.0
+            self.last_frame_observed_at: float | None = None
 
             saved_blender = args.blender or self.config.get("blender") or ""
             if not saved_blender:
@@ -1353,6 +1448,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.status_detail_var, "Waiting for render setup")
             self.progress_var = tk.DoubleVar(value=0.0)
             self.progress_text_var = tk.StringVar(value="0%")
+            self.remaining_time_var = tk.StringVar()
+            self.set_localized(self.remaining_time_var, "Approx. remaining time appears after the first frame")
             self.use_cpu_var = tk.BooleanVar(value=(self.config.get("use_cpu", "1") != "0"))
             self.use_gpu_var = tk.BooleanVar(value=(self.config.get("use_gpu", "1") != "0"))
             self.optimize_enabled_var = tk.BooleanVar(value=(self.config.get("optimize_enabled", "0") == "1"))
@@ -1391,7 +1488,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.memory_prediction_var, "Memory: —")
             self.set_localized(self.autofix_var, "Preflight has not been run")
             self.network_code_var = tk.StringVar(value="")
-            self.network_join_code_var = tk.StringVar(value="")
+            self.network_join_code_var = tk.StringVar(value=self.config.get("network_join_code", ""))
             self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
             self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
             self.network_range_mode_var = tk.StringVar(value=self.config.get("network_range_mode", "resume"))
@@ -1400,7 +1497,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_manual_start_var = tk.StringVar(value=self.config.get("network_manual_start", ""))
             self.network_manual_end_var = tk.StringVar(value=self.config.get("network_manual_end", ""))
             self.network_status_var = tk.StringVar()
-            self.worker_name_var = tk.StringVar(value=platform.node() or self.tr("Render worker"))
+            self.worker_name_var = tk.StringVar(value=self.config.get("network_worker_name") or platform.node() or self.tr("Render worker"))
             self.set_localized(self.network_status_var, "Controller is stopped")
             self.worker_range_start_var = tk.StringVar(value="")
             self.worker_range_end_var = tk.StringVar(value="")
@@ -1501,6 +1598,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.update_access_mode_label()
             if hasattr(self, "access_mode_combo"):
                 self.access_mode_combo.configure(values=self.localized_access_mode_labels())
+            if hasattr(self, "network_access_mode_combo"):
+                self.network_access_mode_combo.configure(values=self.localized_access_mode_labels())
             self.save_current_config()
 
         def localized_theme_labels(self) -> tuple[str, ...]:
@@ -1792,45 +1891,68 @@ def run_gui(args: argparse.Namespace) -> int:
             )
             self.notebook.grid(row=1, column=0, sticky="nsew")
 
-            render_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            def scrollable_tab(text: str):
+                shell = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+                shell.columnconfigure(0, weight=1)
+                shell.rowconfigure(0, weight=1)
+                canvas = tk_module.Canvas(
+                    shell,
+                    background=c["bg"],
+                    borderwidth=0,
+                    highlightthickness=0,
+                    yscrollincrement=24,
+                )
+                scrollbar = ttk_module.Scrollbar(shell, orient="vertical", command=canvas.yview)
+                canvas.configure(yscrollcommand=scrollbar.set)
+                canvas.grid(row=0, column=0, sticky="nsew")
+                scrollbar.grid(row=0, column=1, sticky="ns", padx=(7, 0))
+                content = ttk_module.Frame(canvas, style="App.TFrame")
+                window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+                def sync_scroll_region(_event=None) -> None:
+                    width = max(1, canvas.winfo_width())
+                    height = max(content.winfo_reqheight(), canvas.winfo_height())
+                    canvas.itemconfigure(window_id, width=width, height=height)
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+
+                content.bind("<Configure>", sync_scroll_region, add="+")
+                canvas.bind("<Configure>", sync_scroll_region, add="+")
+                self.tab_scroll_canvases.append(canvas)
+                self.notebook.add(shell, text=text)
+                return content
+
+            render_tab = scrollable_tab("  Render  ")
             render_tab.columnconfigure(0, weight=1)
             render_tab.rowconfigure(1, weight=1)
-            self.notebook.add(render_tab, text="  Render  ")
 
-            queue_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            queue_tab = scrollable_tab("  Queue  ")
             queue_tab.columnconfigure(0, weight=1)
             queue_tab.rowconfigure(0, weight=1)
-            self.notebook.add(queue_tab, text="  Queue  ")
 
-            network_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            network_tab = scrollable_tab("  Network  ")
             network_tab.columnconfigure(0, weight=1)
             network_tab.rowconfigure(0, weight=1)
-            self.notebook.add(network_tab, text="  Network  ")
 
-            insights_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            insights_tab = scrollable_tab("  Insights  ")
             insights_tab.columnconfigure(0, weight=1)
             insights_tab.rowconfigure(0, weight=1)
-            self.notebook.add(insights_tab, text="  Insights  ")
 
-            sandbox_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            sandbox_tab = scrollable_tab("  Sandbox  ")
             sandbox_tab.columnconfigure(0, weight=1)
             sandbox_tab.rowconfigure(0, weight=1)
-            self.notebook.add(sandbox_tab, text="  Sandbox  ")
 
-            advanced_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            advanced_tab = scrollable_tab("  Advanced  ")
             advanced_tab.columnconfigure(0, weight=1)
             advanced_tab.rowconfigure(0, weight=1)
-            self.notebook.add(advanced_tab, text="  Advanced  ")
 
-            settings_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            settings_tab = scrollable_tab("  Settings  ")
             settings_tab.columnconfigure(0, weight=1)
             settings_tab.rowconfigure(0, weight=1)
-            self.notebook.add(settings_tab, text="  Settings  ")
 
-            logs_tab = ttk_module.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+            logs_tab = scrollable_tab("  Logs  ")
             logs_tab.columnconfigure(0, weight=1)
             logs_tab.rowconfigure(0, weight=1)
-            self.notebook.add(logs_tab, text="  Logs  ")
+            self.root.bind_all("<MouseWheel>", self.on_tab_mousewheel, add="+")
 
             setup_grid = ttk_module.Frame(render_tab, style="App.TFrame")
             setup_grid.grid(row=0, column=0, sticky="ew", pady=(0, 18))
@@ -1891,6 +2013,11 @@ def run_gui(args: argparse.Namespace) -> int:
             progress_header.columnconfigure(0, weight=1)
             ttk_module.Label(progress_header, text="Render Timeline", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(progress_header, textvariable=self.progress_text_var, style="ProgressText.TLabel").grid(row=0, column=1, sticky="e")
+            ttk_module.Label(
+                progress_header,
+                textvariable=self.remaining_time_var,
+                style="CardHint.TLabel",
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
             self.progress_bar = ttk_module.Progressbar(progress_card, variable=self.progress_var, maximum=100, mode="determinate", style="Modern.Horizontal.TProgressbar")
             self.progress_bar.grid(row=1, column=0, sticky="ew")
 
@@ -2079,6 +2206,23 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Button(render_actions, text="Start render", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew", padx=(0, 4))
             ttk_module.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, sticky="ew", padx=(4, 0))
             ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=11, column=0, sticky="w", pady=(10, 0))
+            network_access = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            network_access.grid(row=12, column=0, sticky="ew", pady=(14, 0))
+            network_access.columnconfigure(1, weight=1)
+            ttk_module.Label(network_access, text="Code behaviour", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            self.network_access_mode_combo = ttk_module.Combobox(
+                network_access,
+                textvariable=self.access_mode_var,
+                values=self.localized_access_mode_labels(),
+                state="readonly",
+                width=17,
+            )
+            self.network_access_mode_combo.grid(row=0, column=1, sticky="ew")
+            self.network_access_mode_combo.bind("<<ComboboxSelected>>", self.change_access_mode)
+            ttk_module.Button(network_access, text="Apply access", command=self.apply_access_settings).grid(row=0, column=2, padx=(8, 0))
+            ttk_module.Label(network_access, text="Saved access key", style="Field.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            ttk_module.Entry(network_access, textvariable=self.access_key_var).grid(row=1, column=1, sticky="ew", pady=(8, 0))
+            ttk_module.Button(network_access, text="New key", command=self.create_new_access_key).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
 
             worker_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
             self.network_worker_card = worker_card._glass_shell
@@ -2105,13 +2249,18 @@ def run_gui(args: argparse.Namespace) -> int:
             for column in columns:
                 self.register_heading(self.network_tree, column, headings[column])
                 self.network_tree.column(column, width=widths[column], anchor="center" if column in {"state", "current", "done", "average", "samples", "range"} else "w")
+            tree_y = ttk_module.Scrollbar(nodes_card, orient="vertical", command=self.network_tree.yview)
+            tree_x = ttk_module.Scrollbar(nodes_card, orient="horizontal", command=self.network_tree.xview)
+            self.network_tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
             self.network_tree.grid(row=1, column=0, sticky="nsew")
+            tree_y.grid(row=1, column=1, sticky="ns")
+            tree_x.grid(row=2, column=0, sticky="ew", pady=(6, 0))
             self.network_tree.bind("<<TreeviewSelect>>", self.on_network_device_selected)
             ttk_module.Label(
                 nodes_card,
                 text="Select a device to open its render settings",
                 style="CardHint.TLabel",
-            ).grid(row=2, column=0, sticky="w", pady=(10, 0))
+            ).grid(row=3, column=0, sticky="w", pady=(10, 0))
             self.root.after_idle(self.update_network_role_view)
             self.root.after_idle(self.update_network_range_mode_view)
 
@@ -2472,6 +2621,21 @@ def run_gui(args: argparse.Namespace) -> int:
         def add_optimization_check(self, parent, ttk_module, row: int, variable: tk.BooleanVar, title: str, hint: str) -> None:
             ttk_module.Checkbutton(parent, text=title, variable=variable, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=row, column=0, sticky="w", pady=6)
             ttk_module.Label(parent, text=hint, style="CardHint.TLabel").grid(row=row, column=1, columnspan=2, sticky="w", padx=(12, 0), pady=6)
+
+        def on_tab_mousewheel(self, event) -> str | None:
+            widget_class = str(getattr(event, "widget", self.root).winfo_class())
+            if widget_class in {"Text", "Treeview", "Listbox"}:
+                return None
+            index = getattr(self.notebook, "current_index", -1)
+            if not 0 <= index < len(self.tab_scroll_canvases):
+                return None
+            canvas = self.tab_scroll_canvases[index]
+            if int(canvas.bbox("all")[3] if canvas.bbox("all") else 0) <= canvas.winfo_height():
+                return None
+            direction = -1 if int(getattr(event, "delta", 0)) > 0 else 1
+            canvas.yview_scroll(direction * 3, "units")
+            return "break"
+
         def make_card(self, parent, ttk_module, row: int, column: int, sticky: str = "nsew", padx=0, pady=0, rowspan: int = 1):
             card = GlassCard(
                 parent,
@@ -2800,6 +2964,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_role_var,
                 self.network_use_local_var,
                 self.controller_name_var,
+                self.worker_name_var,
+                self.network_join_code_var,
                 self.network_range_mode_var,
                 self.network_manual_start_var,
                 self.network_manual_end_var,
@@ -2856,6 +3022,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     "network_role": self.network_role_var.get(),
                     "network_use_local": "1" if self.network_use_local_var.get() else "0",
                     "network_controller_name": self.controller_name_var.get().strip(),
+                    "network_worker_name": self.worker_name_var.get().strip(),
+                    "network_join_code": self.network_join_code_var.get().strip(),
                     "network_range_mode": self.network_range_mode_var.get(),
                     "network_manual_start": self.network_manual_start_var.get().strip(),
                     "network_manual_end": self.network_manual_end_var.get().strip(),
@@ -3322,19 +3490,18 @@ def run_gui(args: argparse.Namespace) -> int:
                     if (frame := frame_number_from_path(path)) is not None and start <= frame <= end
                 }
             self.set_localized(self.status_var, "Network setup")
-            self.set_localized(self.status_detail_var, "Packing project assets for workers")
-            self.set_localized(self.network_status_var, "Preparing a packed project copy…")
+            self.set_localized(self.status_detail_var, "Sharing the selected project with workers")
+            self.set_localized(self.network_status_var, "Preparing the original project…")
             controller = self.network_controller
             threading.Thread(
                 target=self.prepare_network_plan_worker,
-                args=(controller, blender, blend, output, start, end, settings, completed_frames),
+                args=(controller, blend, output, start, end, settings, completed_frames),
                 daemon=True,
             ).start()
 
         def prepare_network_plan_worker(
             self,
             controller: RenderCoordinator,
-            blender: Path,
             blend: Path,
             output: Path,
             start: int,
@@ -3343,12 +3510,13 @@ def run_gui(args: argparse.Namespace) -> int:
             completed_frames: set[int],
         ) -> None:
             try:
-                stamp = int(blend.stat().st_mtime)
-                packed = app_config_dir() / "network_projects" / f"{blend.stem}_{stamp}.blend"
-                prepare_network_project(blender, blend, packed, log=lambda message: self.log_queue.put(message))
+                legacy_cache = app_config_dir() / "network_projects"
+                shutil.rmtree(legacy_cache, ignore_errors=True)
+                if not blend.exists():
+                    raise FileNotFoundError(f"Blend file not found: {blend}")
                 if self.network_controller is not controller:
                     return
-                controller.start_plan(packed, output, start, end, completed_frames)
+                controller.start_plan(blend, output, start, end, completed_frames)
                 self.network_session = RenderSession(str(blend), str(output), start, end, mode="network", settings=settings)
                 self.network_history_saved = False
                 self.log_queue.put(("__NETWORK_STARTED__", start, end, len(completed_frames)))
@@ -3359,7 +3527,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.latest_frame_path = path
             if self.network_session:
                 self.network_session.mark_frame(frame)
-            self.log_queue.put(("__NETWORK_FRAME__", frame, str(path)))
+            self.log_queue.put(("__NETWORK_FRAME__", frame, str(path), float(_duration)))
 
         def start_network_worker(self, confirm: bool = True, name_override: str | None = None) -> None:
             if self.network_worker is not None:
@@ -3397,6 +3565,7 @@ def run_gui(args: argparse.Namespace) -> int:
             except Exception as error:
                 self.log_queue.put(f"[NETWORK] Worker stopped: {error}")
             finally:
+                worker.cleanup_cache()
                 if self.network_worker is worker:
                     self.network_worker = None
 
@@ -3658,11 +3827,21 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.animate_progress(float(summary["progress"]))
                         self.set_localized(
                             self.progress_text_var,
-                            "{completed} / {total} network frames",
+                            "Frames {start}-{end} · {completed}/{total} · {per_minute}/min · {per_hour}/hour",
+                            start=summary["start_frame"],
+                            end=summary["end_frame"],
                             completed=summary["completed"],
                             total=summary["total"],
+                            per_minute=f"{float(summary.get('frames_per_minute') or 0.0):.2f}",
+                            per_hour=f"{float(summary.get('frames_per_hour') or 0.0):.1f}",
                         )
+                        eta_seconds = float(summary.get("eta_seconds") or 0.0)
+                        if eta_seconds > 0:
+                            self.set_localized(self.remaining_time_var, "Approx. remaining: {time}", time=format_duration(eta_seconds))
+                        elif not summary["finished"]:
+                            self.set_localized(self.remaining_time_var, "Measuring network render speed…")
                         if summary["finished"] and not self.network_history_saved and self.network_session:
+                            self.set_localized(self.remaining_time_var, "Render complete")
                             status = "completed" if int(summary["failed"]) == 0 else "failed"
                             self.render_history.add(self.network_session.finish(status))
                             self.save_render_history()
@@ -3696,10 +3875,19 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.animate_progress(float(plan.get("progress") or 0.0))
                         self.set_localized(
                             self.progress_text_var,
-                            "{completed} / {total} network frames",
+                            "Frames {start}-{end} · {completed}/{total} · {per_minute}/min · {per_hour}/hour",
+                            start=plan.get("start_frame") or "—",
+                            end=plan.get("end_frame") or "—",
                             completed=plan.get("completed") or 0,
                             total=plan.get("total") or 0,
+                            per_minute=f"{float(plan.get('frames_per_minute') or 0.0):.2f}",
+                            per_hour=f"{float(plan.get('frames_per_hour') or 0.0):.1f}",
                         )
+                        eta_seconds = float(plan.get("eta_seconds") or 0.0)
+                        if eta_seconds > 0:
+                            self.set_localized(self.remaining_time_var, "Approx. remaining: {time}", time=format_duration(eta_seconds))
+                        elif not plan.get("finished"):
+                            self.set_localized(self.remaining_time_var, "Measuring network render speed…")
             self.refresh_mobile_state_cache()
             try:
                 self.root.after(1000, self.refresh_network_state)
@@ -3790,6 +3978,29 @@ def run_gui(args: argparse.Namespace) -> int:
             workers = 0
             if self.network_controller:
                 workers = sum(time.time() - worker.last_seen < 30 for worker in self.network_controller.workers.values())
+            current_frame = self.current_render_frame
+            remaining_frames = 0
+            average_seconds = self.render_average_seconds
+            if self.network_controller and self.network_controller.plan:
+                summary = self.network_controller.plan.summary()
+                remaining_frames = int(summary.get("remaining_frames") or 0)
+                running = [task.frame for task in self.network_controller.plan.tasks.values() if task.status == "running"]
+                current_frame = min(running) if running else current_frame
+                completed_durations = [task.duration_seconds for task in self.network_controller.plan.tasks.values() if task.status == "completed" and task.duration_seconds > 0]
+                if completed_durations:
+                    average_seconds = sum(completed_durations) / len(completed_durations)
+            else:
+                try:
+                    end_frame = int(self.end_frame_var.get().strip())
+                    remaining_frames = max(0, end_frame - int(current_frame or 0)) if current_frame is not None else 0
+                except ValueError:
+                    remaining_frames = 0
+            preview_version = 0
+            if self.latest_frame_path and self.latest_frame_path.exists():
+                try:
+                    preview_version = self.latest_frame_path.stat().st_mtime_ns
+                except OSError:
+                    preview_version = 0
             self.mobile_state_cache = {
                 "device_name": self.controller_name_var.get().strip() or platform.node() or "Blender PC",
                 "version": APP_VERSION,
@@ -3800,6 +4011,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 "workers": workers,
                 "queue": queue_text or "No queued projects",
                 "preview": bool(self.latest_frame_path and self.latest_frame_path.exists()),
+                "preview_version": preview_version,
+                "current_frame": current_frame,
+                "remaining_frames": remaining_frames,
+                "average_seconds": average_seconds,
             }
 
         def handle_remote_action(self, action: str) -> None:
@@ -3862,6 +4077,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.paused_queue = False
             self.progress_var.set(0.0)
             self.set_localized(self.progress_text_var, "Starting")
+            self.set_localized(self.remaining_time_var, "Approx. remaining time appears after the first frame")
+            self.current_render_frame = None
+            self.render_frame_count = 0
+            self.render_average_seconds = 0.0
+            self.last_frame_observed_at = time.monotonic()
             self.set_localized(self.status_var, "Running")
             self.set_localized(self.status_detail_var, "Blender process is active")
             self.start_button.configure(state="disabled")
@@ -4010,6 +4230,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.queue_running = True
             self.progress_var.set(0.0)
             self.set_localized(self.progress_text_var, "Queue starting")
+            self.set_localized(self.remaining_time_var, "Approx. remaining time appears after the first frame")
+            self.current_render_frame = None
+            self.render_frame_count = 0
+            self.render_average_seconds = 0.0
+            self.last_frame_observed_at = time.monotonic()
             self.set_localized(self.status_var, "Queue")
             self.set_localized(self.status_detail_var, "Preparing the first project")
             self.start_button.configure(state="disabled")
@@ -4280,7 +4505,15 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.refresh_queue_tree()
                     continue
 
-                if isinstance(message, tuple) and len(message) == 3 and message[0] in {"__FRAME_METRIC__", "__NETWORK_FRAME__"}:
+                if isinstance(message, tuple) and len(message) >= 3 and message[0] in {"__FRAME_METRIC__", "__NETWORK_FRAME__"}:
+                    now = time.monotonic()
+                    duration = float(message[3]) if len(message) > 3 else max(0.0, now - (self.last_frame_observed_at or now))
+                    self.last_frame_observed_at = now
+                    self.current_render_frame = int(message[1])
+                    if duration > 0:
+                        self.render_frame_count += 1
+                        count = self.render_frame_count
+                        self.render_average_seconds = ((self.render_average_seconds * (count - 1)) + duration) / count
                     self.latest_frame_path = Path(str(message[2]))
                     continue
 
@@ -4288,6 +4521,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     start = int(message[1])
                     end = int(message[2])
                     skipped = int(message[3]) if len(message) > 3 else 0
+                    self.current_render_frame = None
+                    self.render_frame_count = 0
+                    self.render_average_seconds = 0.0
+                    self.last_frame_observed_at = time.monotonic()
                     self.set_localized(self.status_var, "Network render")
                     if skipped:
                         self.set_localized(self.status_detail_var, "Frames {start}-{end} · {skipped} existing skipped", start=start, end=end, skipped=skipped)
@@ -4313,8 +4550,12 @@ def run_gui(args: argparse.Namespace) -> int:
                     continue
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__HARDWARE__":
-                    cpu = str(message[1])
-                    gpus = [str(item) for item in message[2]]
+                    cpu, gpus = stable_hardware_snapshot(
+                        self.cpu_name,
+                        self.gpu_names,
+                        str(message[1]),
+                        [str(item) for item in message[2]],
+                    )
                     previous = set(self.gpu_names)
                     self.cpu_name = cpu
                     self.gpu_names = gpus
@@ -4446,8 +4687,14 @@ def run_gui(args: argparse.Namespace) -> int:
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__PROGRESS__":
                     percent = float(message[1])
+                    progress_details = str(message[2])
                     self.animate_progress(percent)
-                    self.set_raw(self.progress_text_var, f"{percent:.0f}%  {message[2]}")
+                    self.set_raw(self.progress_text_var, f"{percent:.0f}%  {progress_details}")
+                    eta_match = re.search(r"\bETA\s+(.+)$", progress_details)
+                    if eta_match:
+                        self.set_localized(self.remaining_time_var, "Approx. remaining: {time}", time=eta_match.group(1))
+                    elif percent >= 100:
+                        self.set_localized(self.remaining_time_var, "Render complete")
                     continue
 
                 self.log(str(message))
@@ -4527,6 +4774,8 @@ def main() -> int:
         except KeyboardInterrupt:
             worker.stop()
             return 130
+        finally:
+            worker.cleanup_cache()
 
     if not args.blend or not args.frames:
         return run_gui(args)

@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -212,6 +213,7 @@ class NetworkRenderPlan:
         for frame in completed_frames or set():
             if frame in self.tasks:
                 self.tasks[frame].status = "completed"
+        self.initial_completed = sum(task.status == "completed" for task in self.tasks.values())
         self.paused = False
         self.stopped = False
         self.created_at = time.time()
@@ -301,6 +303,11 @@ class NetworkRenderPlan:
             for task in self.tasks.values():
                 counts[task.status] = counts.get(task.status, 0) + 1
             total = len(self.tasks)
+            elapsed_seconds = max(0.0, time.time() - self.created_at)
+            rendered_now = max(0, counts["completed"] - self.initial_completed)
+            frames_per_minute = (rendered_now / elapsed_seconds * 60.0) if elapsed_seconds > 0 and rendered_now else 0.0
+            remaining_frames = counts["pending"] + counts["running"]
+            eta_seconds = (remaining_frames / frames_per_minute * 60.0) if frames_per_minute > 0 else 0.0
             counts.update(
                 {
                     "plan_id": self.plan_id,
@@ -308,6 +315,11 @@ class NetworkRenderPlan:
                     "end_frame": self.end_frame,
                     "total": total,
                     "progress": (counts["completed"] / total * 100.0) if total else 100.0,
+                    "remaining_frames": remaining_frames,
+                    "elapsed_seconds": elapsed_seconds,
+                    "frames_per_minute": frames_per_minute,
+                    "frames_per_hour": frames_per_minute * 60.0,
+                    "eta_seconds": eta_seconds,
                     "paused": self.paused,
                     "stopped": self.stopped,
                     "finished": counts["completed"] + counts["failed"] == total,
@@ -723,6 +735,7 @@ class NetworkWorker:
         self._project_id = ""
         self._project_path: Path | None = None
         self.status_snapshot: dict[str, object] = {}
+        self._finished_plan_id = ""
 
     @property
     def base_url(self) -> str:
@@ -759,6 +772,7 @@ class NetworkWorker:
         return dict(self.status_snapshot)
 
     def _download_project(self, plan_id: str, project_name: str) -> Path:
+        self._cleanup_project()
         self.cache_folder.mkdir(parents=True, exist_ok=True)
         safe_name = Path(project_name).name or "network_project.blend"
         destination = self.cache_folder / f"{plan_id}_{safe_name}"
@@ -775,6 +789,44 @@ class NetworkWorker:
         self._project_id = plan_id
         self._project_path = destination
         return destination
+
+    def _is_inside_cache(self, path: Path) -> bool:
+        try:
+            path.resolve().relative_to(self.cache_folder.resolve())
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _cleanup_frame_output(self, output: Path | None) -> None:
+        if output is None or not self._is_inside_cache(output):
+            return
+        frames_root = self.cache_folder / "frames"
+        try:
+            output.resolve().relative_to(frames_root.resolve())
+        except (OSError, ValueError):
+            return
+        shutil.rmtree(output.parent, ignore_errors=True)
+
+    def _cleanup_project(self) -> None:
+        project = self._project_path
+        if project is not None and self._is_inside_cache(project):
+            try:
+                project.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._project_id = ""
+        self._project_path = None
+
+    def cleanup_cache(self) -> None:
+        """Remove only files created inside this worker's dedicated cache."""
+        self._cleanup_project()
+        frames_root = self.cache_folder / "frames"
+        if self._is_inside_cache(frames_root):
+            shutil.rmtree(frames_root, ignore_errors=True)
+        try:
+            self.cache_folder.rmdir()
+        except OSError:
+            pass
 
     def _render_frame(
         self,
@@ -833,6 +885,7 @@ class NetworkWorker:
                     return
                 if state == "task":
                     plan_id = str(task["plan_id"])
+                    self._finished_plan_id = ""
                     if self._project_id != plan_id or self._project_path is None or not self._project_path.exists():
                         self.event("[NETWORK] Downloading project...")
                         self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
@@ -860,11 +913,19 @@ class NetworkWorker:
                     if success and output:
                         result["extension"] = output.suffix.lower()
                         result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
-                    _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
+                    try:
+                        _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
+                    finally:
+                        self._cleanup_frame_output(output)
                 elif state == "finished" and not stay_connected:
+                    self.cleanup_cache()
                     self.event("[NETWORK] Distributed render is complete")
                     return
                 elif state == "finished":
+                    plan_id = str((task.get("summary") or {}).get("plan_id") or "") if isinstance(task.get("summary"), dict) else ""
+                    if plan_id and plan_id != self._finished_plan_id:
+                        self.cleanup_cache()
+                        self._finished_plan_id = plan_id
                     self.stop_event.wait(poll_seconds)
                 else:
                     self.stop_event.wait(poll_seconds)
