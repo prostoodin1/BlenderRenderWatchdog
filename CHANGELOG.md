@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.5.0 — 2026-08-15
+
+### Progress and layout
+
+- Added approximate remaining time to the main render view and frame range, frames/minute and frames/hour to network progress.
+- Made every desktop tab vertically scrollable and added two-axis scrolling to the connected-device table.
+- Preserved the last valid CPU/GPU snapshot when a transient Windows hardware query fails.
+
+### Network workflow
+
+- Added rotating or persistent access-code controls directly to the Network tab and saved worker names and join codes.
+- Send the original `.blend` with its original filename instead of creating a second packed project copy.
+- Write uploaded frames directly to the output chosen on the Render tab and automatically remove worker cache after completion.
+
+### Android client
+
+- Made the compact matte cloud navigation auto-hide after five seconds and reappear on interaction.
+- Added connection grace retries, device renaming, optional detailed frame metrics and latest-frame previews.
+- Added Emerald, Ocean and Amber themes plus a dedicated adaptive launcher icon.
+
+### Updater and engineering
+
+- Reset the PyInstaller environment on restart to prevent missing `_MEI` Python DLL errors.
+- Added SHA-256 verification, replacement retries, working-directory launch and automatic rollback.
+- Expanded automated coverage for render rate/ETA, worker cache cleanup, hardware snapshots, updater restart and Android features.
+
 ## 2.4.2 — 2026-08-05
 
 ### Device render controls

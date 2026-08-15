@@ -4,6 +4,7 @@ import threading
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, worker_device_script
 
@@ -69,6 +70,24 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(released, [1])
         self.assertEqual(task.status, "pending")
         self.assertEqual(task.worker_id, "")
+
+    def test_summary_reports_range_rate_and_eta_for_current_session(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 10, 13, completed_frames={10})
+        worker = WorkerState("a", "Worker")
+        task = plan.claim(worker)
+        self.assertEqual(task.frame, 11)
+        task.started_at = 90.0
+        plan.created_at = 40.0
+        with patch("network_render.time.time", return_value=100.0), patch("network_render.time.monotonic", return_value=100.0):
+            plan.complete(worker, 11, True)
+            summary = plan.summary()
+
+        self.assertEqual(summary["start_frame"], 10)
+        self.assertEqual(summary["end_frame"], 13)
+        self.assertAlmostEqual(summary["frames_per_minute"], 1.0)
+        self.assertAlmostEqual(summary["frames_per_hour"], 60.0)
+        self.assertEqual(summary["remaining_frames"], 2)
+        self.assertAlmostEqual(summary["eta_seconds"], 120.0)
 
 
 class CoordinatorHttpTests(unittest.TestCase):
@@ -178,6 +197,7 @@ class CoordinatorHttpTests(unittest.TestCase):
                 self.assertEqual((root / "renders" / "frame_0002.png").read_bytes(), VALID_PNG)
                 self.assertIn("devices", worker.status_snapshot)
                 self.assertEqual(worker.status_snapshot["controller"]["host"], "127.0.0.1")
+                self.assertFalse((root / "cache").exists())
             finally:
                 worker.stop()
                 coordinator.stop()

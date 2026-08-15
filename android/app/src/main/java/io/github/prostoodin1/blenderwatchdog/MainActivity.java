@@ -8,6 +8,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.ColorFilter;
 import android.graphics.Paint;
 import android.graphics.Path;
@@ -21,11 +23,13 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -37,6 +41,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -55,9 +60,12 @@ public class MainActivity extends Activity {
     private static final String PREFS = "watchdog_mobile";
     private static final String DEVICES_KEY = "devices";
     private static final String REFRESH_KEY = "refresh_ms";
+    private static final String DETAILS_KEY = "show_device_details";
+    private static final String THEME_KEY = "theme";
+    private static final long NAV_HIDE_DELAY = 5000L;
     private static final int WHITE = Color.rgb(244, 249, 250);
     private static final int MUTED = Color.rgb(161, 180, 186);
-    private static final int ACCENT = Color.rgb(97, 220, 203);
+    private static final int DEFAULT_ACCENT = Color.rgb(97, 220, 203);
     private static final int DANGER = Color.rgb(255, 128, 144);
 
     private final ExecutorService network = Executors.newFixedThreadPool(4);
@@ -69,6 +77,18 @@ public class MainActivity extends Activity {
     private SharedPreferences preferences;
     private int currentTab = 0;
     private int refreshMs = 5000;
+    private boolean showDeviceDetails = false;
+    private int accent = DEFAULT_ACCENT;
+
+    private final Runnable hideNavigation = () -> {
+        if (nav == null || nav.getVisibility() != View.VISIBLE) return;
+        nav.animate()
+            .translationY(nav.getHeight() + dp(18))
+            .alpha(0f)
+            .setDuration(240)
+            .withEndAction(() -> nav.setVisibility(View.INVISIBLE))
+            .start();
+    };
 
     private final Runnable poller = new Runnable() {
         @Override public void run() {
@@ -85,6 +105,8 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(Color.rgb(10, 17, 23));
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         refreshMs = preferences.getInt(REFRESH_KEY, 5000);
+        showDeviceDetails = preferences.getBoolean(DETAILS_KEY, false);
+        accent = themeAccent(preferences.getString(THEME_KEY, "emerald"));
         loadDevices();
         buildShell();
         showDevices();
@@ -92,8 +114,30 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         main.removeCallbacks(poller);
+        main.removeCallbacks(hideNavigation);
         network.shutdownNow();
         super.onDestroy();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (currentTab == 0) {
+            main.removeCallbacks(poller);
+            main.post(poller);
+        }
+        showNavigation();
+    }
+
+    @Override protected void onPause() {
+        main.removeCallbacks(poller);
+        main.removeCallbacks(hideNavigation);
+        super.onPause();
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) showNavigation();
+        return super.dispatchTouchEvent(event);
     }
 
     private void buildShell() {
@@ -103,22 +147,27 @@ public class MainActivity extends Activity {
             new int[]{Color.rgb(20, 53, 57), Color.rgb(8, 16, 22), Color.rgb(24, 29, 43)}
         );
         root.setBackground(background);
+        root.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN || event.getAction() == MotionEvent.ACTION_MOVE) showNavigation();
+            return false;
+        });
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         nav = new LinearLayout(this);
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setGravity(Gravity.CENTER);
-        nav.setPadding(dp(9), dp(11), dp(9), dp(8));
-        nav.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        nav.setPadding(dp(7), dp(7), dp(7), dp(6));
+        nav.setElevation(dp(12));
         nav.setBackground(new CloudNavDrawable());
         addNavButton(R.string.devices, 0);
         addNavButton(R.string.history, 1);
         addNavButton(R.string.settings, 2);
-        LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(82));
-        navParams.setMargins(dp(14), 0, dp(14), dp(12));
+        LinearLayout.LayoutParams navParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(66));
+        navParams.setMargins(dp(48), 0, dp(48), dp(8));
         root.addView(nav, navParams);
         setContentView(root);
+        showNavigation();
     }
 
     private void addNavButton(int label, int tab) {
@@ -139,6 +188,7 @@ public class MainActivity extends Activity {
     private void selectTab(int tab) {
         currentTab = tab;
         main.removeCallbacks(poller);
+        showNavigation();
         selectNavOnly(tab);
         if (tab == 0) showDevices();
         else if (tab == 1) showHistory();
@@ -148,7 +198,7 @@ public class MainActivity extends Activity {
     private LinearLayout page(int title, int hint) {
         LinearLayout page = vertical();
         page.setPadding(dp(18), dp(20), dp(18), dp(22));
-        TextView eyebrow = text(getString(R.string.eyebrow), 12, ACCENT, Typeface.BOLD);
+        TextView eyebrow = text(getString(R.string.eyebrow), 12, accent, Typeface.BOLD);
         eyebrow.setLetterSpacing(.12f);
         page.addView(eyebrow);
         TextView heading = text(getString(title), 31, WHITE, Typeface.BOLD);
@@ -226,6 +276,7 @@ public class MainActivity extends Activity {
         LinearLayout card = card();
         LinearLayout header = row();
         TextView name = text(device.name, 19, WHITE, Typeface.BOLD);
+        name.setOnClickListener(view -> renameDevice(device));
         TextView status = text(getString(R.string.connecting), 13, MUTED, Typeface.BOLD);
         status.setGravity(Gravity.END);
         header.addView(name, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -234,20 +285,29 @@ public class MainActivity extends Activity {
 
         TextView project = text("—", 15, WHITE, Typeface.NORMAL);
         TextView detail = text(device.host + ":" + device.port, 13, MUTED, Typeface.NORMAL);
+        detail.setVisibility(showDeviceDetails ? View.VISIBLE : View.GONE);
         card.addView(project, margins(-1, -2, 0, dp(10), 0));
         card.addView(detail, margins(-1, -2, 0, dp(3), dp(9)));
 
         LinearLayout progressRow = row();
         progressRow.addView(text(getString(R.string.progress), 12, MUTED, Typeface.BOLD), new LinearLayout.LayoutParams(0, -2, 1f));
-        TextView percent = text("0%", 14, ACCENT, Typeface.BOLD);
+        TextView percent = text("0%", 14, accent, Typeface.BOLD);
         percent.setGravity(Gravity.END);
         progressRow.addView(percent, new LinearLayout.LayoutParams(0, -2, 1f));
         card.addView(progressRow);
         ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
-        progress.setProgressTintList(android.content.res.ColorStateList.valueOf(ACCENT));
+        progress.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));
         progress.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(30, 50, 56)));
         card.addView(progress, margins(-1, dp(8), 0, dp(5), dp(12)));
+
+        ImageView preview = new ImageView(this);
+        preview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        preview.setAdjustViewBounds(true);
+        preview.setMinimumHeight(dp(120));
+        preview.setBackground(glass(Color.argb(105, 7, 18, 22), 18, Color.argb(60, 255, 255, 255)));
+        preview.setVisibility(View.GONE);
+        if (showDeviceDetails) card.addView(preview, margins(-1, dp(160), 0, 0, dp(12)));
 
         LinearLayout actions = row();
         Button pause = actionButton(getString(R.string.pause), true);
@@ -264,7 +324,7 @@ public class MainActivity extends Activity {
         actions.addView(remove, new LinearLayout.LayoutParams(0, dp(46), 1f));
         card.addView(actions);
 
-        deviceBindings.put(device.id(), new DeviceBinding(status, project, detail, percent, progress));
+        deviceBindings.put(device.id(), new DeviceBinding(device, status, project, detail, percent, progress, preview));
         return card;
     }
 
@@ -363,6 +423,25 @@ public class MainActivity extends Activity {
         choices.addView(space(dp(7), 1));
         choices.addView(intervalButton(R.string.ten_seconds, 10000), new LinearLayout.LayoutParams(0, dp(48), 1f));
         card.addView(choices, margins(-1, -2, 0, dp(10), dp(14)));
+        card.addView(text(getString(R.string.device_card_details), 17, WHITE, Typeface.BOLD));
+        Button details = actionButton(
+            getString(showDeviceDetails ? R.string.hide_details : R.string.show_details),
+            showDeviceDetails
+        );
+        details.setOnClickListener(view -> {
+            showDeviceDetails = !showDeviceDetails;
+            preferences.edit().putBoolean(DETAILS_KEY, showDeviceDetails).apply();
+            showSettings();
+        });
+        card.addView(details, margins(-1, dp(48), 0, dp(8), dp(14)));
+        card.addView(text(getString(R.string.colour_theme), 17, WHITE, Typeface.BOLD));
+        LinearLayout themes = row();
+        themes.addView(themeButton(R.string.theme_emerald, "emerald"), new LinearLayout.LayoutParams(0, dp(48), 1f));
+        themes.addView(space(dp(7), 1));
+        themes.addView(themeButton(R.string.theme_ocean, "ocean"), new LinearLayout.LayoutParams(0, dp(48), 1f));
+        themes.addView(space(dp(7), 1));
+        themes.addView(themeButton(R.string.theme_amber, "amber"), new LinearLayout.LayoutParams(0, dp(48), 1f));
+        card.addView(themes, margins(-1, -2, 0, dp(8), dp(14)));
         card.addView(text(getString(R.string.saved_devices, devices.size()), 14, MUTED, Typeface.NORMAL));
         Button clear = actionButton(getString(R.string.clear_devices), false);
         clear.setTextColor(DANGER);
@@ -389,6 +468,22 @@ public class MainActivity extends Activity {
         return button;
     }
 
+    private Button themeButton(int label, String theme) {
+        boolean selected = theme.equals(preferences.getString(THEME_KEY, "emerald"));
+        Button button = actionButton(getString(label), selected);
+        button.setOnClickListener(view -> {
+            preferences.edit().putString(THEME_KEY, theme).apply();
+            recreate();
+        });
+        return button;
+    }
+
+    private int themeAccent(String theme) {
+        if ("ocean".equals(theme)) return Color.rgb(80, 190, 255);
+        if ("amber".equals(theme)) return Color.rgb(255, 190, 88);
+        return DEFAULT_ACCENT;
+    }
+
     private void confirmRemove(Device device) {
         new AlertDialog.Builder(this)
             .setTitle(R.string.remove_title)
@@ -400,6 +495,73 @@ public class MainActivity extends Activity {
                 showDevices();
             })
             .show();
+    }
+
+    private void renameDevice(Device device) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(device.name);
+        input.setSelectAllOnFocus(true);
+        input.setTextColor(WHITE);
+        input.setHintTextColor(MUTED);
+        input.setBackground(glass(Color.argb(150, 8, 20, 25), 15, Color.argb(80, 255, 255, 255)));
+        input.setPadding(dp(14), dp(10), dp(14), dp(10));
+        new AlertDialog.Builder(this)
+            .setTitle(R.string.rename_device)
+            .setView(input)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.save, (dialog, which) -> {
+                String newName = input.getText().toString().trim();
+                if (newName.isEmpty()) return;
+                for (int index = 0; index < devices.size(); index++) {
+                    if (devices.get(index).id().equals(device.id())) {
+                        devices.set(index, device.withName(newName));
+                        break;
+                    }
+                }
+                saveDevices();
+                showDevices();
+            })
+            .show();
+    }
+
+    private void loadPreview(Device device, DeviceBinding binding, long version) {
+        network.execute(() -> {
+            try {
+                byte[] bytes = requestBytes(device, "/preview");
+                Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                if (bitmap == null) return;
+                main.post(() -> {
+                    DeviceBinding current = deviceBindings.get(device.id());
+                    if (current != binding) return;
+                    binding.previewVersion = version;
+                    binding.preview.setImageBitmap(bitmap);
+                    binding.preview.setVisibility(View.VISIBLE);
+                });
+            } catch (Exception ignored) { }
+        });
+    }
+
+    private byte[] requestBytes(Device device, String path) throws Exception {
+        String token = URLEncoder.encode(device.token, StandardCharsets.UTF_8.name());
+        URL url = new URL("http", device.host, device.port, path + "?token=" + token);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setConnectTimeout(3500);
+        connection.setReadTimeout(6000);
+        connection.setUseCaches(false);
+        int status = connection.getResponseCode();
+        if (status < 200 || status >= 300) {
+            connection.disconnect();
+            throw new IllegalStateException("HTTP " + status);
+        }
+        try (InputStream stream = connection.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = stream.read(buffer)) >= 0) output.write(buffer, 0, read);
+            return output.toByteArray();
+        } finally {
+            connection.disconnect();
+        }
     }
 
     private JSONObject getJson(Device device, String path) throws Exception {
@@ -415,8 +577,8 @@ public class MainActivity extends Activity {
         URL url = new URL("http", device.host, device.port, path + "?token=" + token);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod(method);
-        connection.setConnectTimeout(2200);
-        connection.setReadTimeout(3500);
+        connection.setConnectTimeout(3500);
+        connection.setReadTimeout(6000);
         connection.setUseCaches(false);
         if (payload != null) {
             connection.setDoOutput(true);
@@ -490,7 +652,7 @@ public class MainActivity extends Activity {
         button.setPadding(dp(7), 0, dp(7), 0);
         button.setGravity(Gravity.CENTER);
         button.setBackground(glass(
-            active ? ACCENT : Color.argb(180, 33, 55, 64),
+            active ? accent : Color.argb(180, 33, 55, 64),
             17,
             active ? Color.argb(160, 255, 255, 255) : Color.argb(75, 255, 255, 255)
         ));
@@ -563,6 +725,15 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showNavigation() {
+        if (nav == null) return;
+        main.removeCallbacks(hideNavigation);
+        nav.animate().cancel();
+        nav.setVisibility(View.VISIBLE);
+        nav.animate().translationY(0f).alpha(1f).setDuration(180).start();
+        main.postDelayed(hideNavigation, NAV_HIDE_DELAY);
+    }
+
     private final class CloudNavDrawable extends Drawable {
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -570,11 +741,10 @@ public class MainActivity extends Activity {
         private final Path cloud = new Path();
 
         CloudNavDrawable() {
-            fill.setColor(Color.argb(238, 20, 35, 43));
-            fill.setShadowLayer(dp(14), 0, dp(7), Color.argb(145, 0, 0, 0));
+            fill.setColor(Color.argb(246, 20, 35, 43));
             border.setStyle(Paint.Style.STROKE);
             border.setStrokeWidth(dp(1));
-            border.setColor(Color.argb(95, 255, 255, 255));
+            border.setColor(Color.argb(105, Color.red(accent), Color.green(accent), Color.blue(accent)));
             highlight.setStyle(Paint.Style.STROKE);
             highlight.setStrokeWidth(dp(1));
             highlight.setColor(Color.argb(90, 255, 255, 255));
@@ -582,14 +752,14 @@ public class MainActivity extends Activity {
 
         @Override public void draw(Canvas canvas) {
             RectF bounds = new RectF(getBounds());
-            float inset = dp(5);
-            RectF base = new RectF(bounds.left + inset, bounds.top + dp(16), bounds.right - inset, bounds.bottom - dp(5));
+            float inset = dp(4);
+            RectF base = new RectF(bounds.left + inset, bounds.top + dp(12), bounds.right - inset, bounds.bottom - dp(3));
             cloud.reset();
-            cloud.addRoundRect(base, dp(30), dp(30), Path.Direction.CW);
+            cloud.addRoundRect(base, dp(24), dp(24), Path.Direction.CW);
             for (int index = 0; index < 3; index++) {
                 float center = bounds.left + bounds.width() * (index * 2 + 1) / 6f;
                 Path bubble = new Path();
-                bubble.addCircle(center, bounds.top + dp(24), dp(24), Path.Direction.CW);
+                bubble.addCircle(center, bounds.top + dp(19), dp(18), Path.Direction.CW);
                 cloud.op(bubble, Path.Op.UNION);
             }
             canvas.drawPath(cloud, fill);
@@ -603,34 +773,65 @@ public class MainActivity extends Activity {
     }
 
     private final class DeviceBinding {
+        final Device device;
         final TextView status;
         final TextView project;
         final TextView detail;
         final TextView percent;
         final ProgressBar progress;
+        final ImageView preview;
+        int failures = 0;
+        long previewVersion = -1;
 
-        DeviceBinding(TextView status, TextView project, TextView detail, TextView percent, ProgressBar progress) {
+        DeviceBinding(Device device, TextView status, TextView project, TextView detail, TextView percent, ProgressBar progress, ImageView preview) {
+            this.device = device;
             this.status = status;
             this.project = project;
             this.detail = detail;
             this.percent = percent;
             this.progress = progress;
+            this.preview = preview;
         }
 
         void online(JSONObject state) {
+            failures = 0;
             status.setText(R.string.online);
-            status.setTextColor(ACCENT);
+            status.setTextColor(accent);
             project.setText(state.optString("project", "—"));
-            detail.setText(state.optString("detail", state.optString("status", "")));
+            if (showDeviceDetails) {
+                int current = state.optInt("current_frame", -1);
+                int remaining = Math.max(0, state.optInt("remaining_frames", 0));
+                double average = Math.max(0, state.optDouble("average_seconds", 0));
+                String currentLabel = current >= 0 ? String.valueOf(current) : "—";
+                detail.setText(getString(R.string.render_details, currentLabel, formatDuration(average), remaining));
+                detail.setVisibility(View.VISIBLE);
+                long version = state.optLong("preview_version", 0);
+                if (state.optBoolean("preview", false) && version > 0 && version != previewVersion) {
+                    loadPreview(device, this, version);
+                }
+            }
             int value = Math.max(0, Math.min(100, (int) Math.round(state.optDouble("progress", 0))));
             percent.setText(String.format(Locale.getDefault(), "%d%%", value));
             progress.setProgress(value, true);
         }
 
         void offline() {
+            failures++;
+            if (failures < 3) {
+                status.setText(R.string.reconnecting);
+                status.setTextColor(MUTED);
+                return;
+            }
             status.setText(R.string.offline);
             status.setTextColor(DANGER);
         }
+    }
+
+    private String formatDuration(double seconds) {
+        if (seconds <= 0) return "—";
+        int rounded = (int) Math.round(seconds);
+        if (rounded < 60) return rounded + "s";
+        return (rounded / 60) + "m " + (rounded % 60) + "s";
     }
 
     private static final class Device {
@@ -649,6 +850,8 @@ public class MainActivity extends Activity {
         }
 
         String id() { return host + ":" + port; }
+
+        Device withName(String newName) { return new Device(host, port, token, newName, version); }
 
         JSONObject toJson() {
             JSONObject data = new JSONObject();
