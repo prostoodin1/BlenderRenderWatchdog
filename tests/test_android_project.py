@@ -22,11 +22,19 @@ class AndroidProjectTests(unittest.TestCase):
         self.assertIn('postJson(device, "/api/action"', activity)
         self.assertIn("CloudNavDrawable", activity)
         self.assertIn("Path.Op.UNION", activity)
+        self.assertIn("NAV_HIDE_DELAY = 5000L", activity)
+        self.assertIn("failures < 3", activity)
+        self.assertIn('requestBytes(device, "/preview")', activity)
+        self.assertIn("show_device_details", activity)
+        self.assertIn("themeAccent", activity)
+        self.assertIn("withName", activity)
 
     def test_lan_http_and_internet_permission_are_explicit(self) -> None:
         manifest = (ANDROID / "app" / "src" / "main" / "AndroidManifest.xml").read_text(encoding="utf-8")
         self.assertIn("android.permission.INTERNET", manifest)
         self.assertIn('android:usesCleartextTraffic="true"', manifest)
+        self.assertIn('android:icon="@mipmap/ic_launcher"', manifest)
+        self.assertTrue((ANDROID / "app" / "src" / "main" / "res" / "drawable" / "ic_watchdog_foreground.xml").exists())
 
     def test_russian_android_resources_are_present(self) -> None:
         strings = (ANDROID / "app" / "src" / "main" / "res" / "values-ru" / "strings.xml").read_text(encoding="utf-8")

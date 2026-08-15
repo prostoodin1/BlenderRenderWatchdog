@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Blender Watchdog</string>
-    <string name="eyebrow">BLENDER WATCHDOG 2.4.2</string>
+    <string name="eyebrow">BLENDER WATCHDOG 2.5.0</string>
     <string name="devices">Devices</string>
     <string name="history">History</string>
     <string name="settings">Settings</string>
@@ -16,6 +16,7 @@
     <string name="online">Online</string>
     <string name="offline">Offline</string>
     <string name="connecting">Connecting…</string>
+    <string name="reconnecting">Reconnecting…</string>
     <string name="progress">Progress</string>
     <string name="pause">Pause / resume</string>
     <string name="stop">Stop</string>
@@ -23,6 +24,8 @@
     <string name="remove_title">Remove device?</string>
     <string name="remove_message">Its saved sync code will be deleted from this phone.</string>
     <string name="cancel">Cancel</string>
+    <string name="save">Save</string>
+    <string name="rename_device">Rename device</string>
     <string name="command_sent">Command sent</string>
     <string name="render_history">Render history</string>
     <string name="history_hint">Recent sessions from every saved computer.</string>
@@ -35,8 +38,16 @@
     <string name="two_seconds">2 seconds</string>
     <string name="five_seconds">5 seconds</string>
     <string name="ten_seconds">10 seconds</string>
+    <string name="device_card_details">Device card details</string>
+    <string name="show_details">Show details and preview</string>
+    <string name="hide_details">Hide details and preview</string>
+    <string name="colour_theme">Colour theme</string>
+    <string name="theme_emerald">Emerald</string>
+    <string name="theme_ocean">Ocean</string>
+    <string name="theme_amber">Amber</string>
+    <string name="render_details">Frame %1$s · average %2$s · %3$d remaining</string>
     <string name="saved_devices">Saved devices: %1$d</string>
     <string name="clear_devices">Remove all devices</string>
     <string name="security_note">Treat a sync code like a password. Change the access key on the desktop to revoke every old phone code.</string>
-    <string name="about">Native Android client · version 2.4.2</string>
+    <string name="about">Native Android client · version 2.5.0</string>
 </resources>
