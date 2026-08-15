@@ -84,7 +84,7 @@ QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.5.0"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1409,6 +1409,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.progress_animation_id: str | None = None
             self.progress_animation_target = 0.0
             self.tab_scroll_canvases: list[object] = []
+            self.tab_scroll_refreshers: list[object] = []
+            self.mousewheel_bound = False
             self.current_render_frame: int | None = None
             self.render_frame_count = 0
             self.render_average_seconds = 0.0
@@ -1845,6 +1847,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 font=("Segoe UI", 9, "bold"),
             )
         def build_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
+            self.tab_scroll_canvases.clear()
+            self.tab_scroll_refreshers.clear()
             c = self.colors
             ttk_module = GlassWidgetFactory(
                 ttk_module,
@@ -1918,6 +1922,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 content.bind("<Configure>", sync_scroll_region, add="+")
                 canvas.bind("<Configure>", sync_scroll_region, add="+")
                 self.tab_scroll_canvases.append(canvas)
+                self.tab_scroll_refreshers.append(sync_scroll_region)
                 self.notebook.add(shell, text=text)
                 return content
 
@@ -1952,7 +1957,9 @@ def run_gui(args: argparse.Namespace) -> int:
             logs_tab = scrollable_tab("  Logs  ")
             logs_tab.columnconfigure(0, weight=1)
             logs_tab.rowconfigure(0, weight=1)
-            self.root.bind_all("<MouseWheel>", self.on_tab_mousewheel, add="+")
+            if not self.mousewheel_bound:
+                self.root.bind_all("<MouseWheel>", self.on_tab_mousewheel, add="+")
+                self.mousewheel_bound = True
 
             setup_grid = ttk_module.Frame(render_tab, style="App.TFrame")
             setup_grid.grid(row=0, column=0, sticky="ew", pady=(0, 18))
@@ -2064,6 +2071,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.build_advanced_tab(advanced_tab, ttk_module)
             self.build_settings_tab(settings_tab, ttk_module)
             self.notebook.bind("<<NotebookTabChanged>>", self.animate_tab_change)
+            self.root.after_idle(self.refresh_tab_scroll_regions)
+            self.root.after(250, self.refresh_tab_scroll_regions)
 
         def build_queue_tab(self, parent, ttk_module) -> None:
             queue_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew")
@@ -2629,12 +2638,20 @@ def run_gui(args: argparse.Namespace) -> int:
             index = getattr(self.notebook, "current_index", -1)
             if not 0 <= index < len(self.tab_scroll_canvases):
                 return None
+            self.tab_scroll_refreshers[index]()
             canvas = self.tab_scroll_canvases[index]
             if int(canvas.bbox("all")[3] if canvas.bbox("all") else 0) <= canvas.winfo_height():
                 return None
             direction = -1 if int(getattr(event, "delta", 0)) > 0 else 1
             canvas.yview_scroll(direction * 3, "units")
             return "break"
+
+        def refresh_tab_scroll_regions(self) -> None:
+            for refresh in tuple(self.tab_scroll_refreshers):
+                try:
+                    refresh()
+                except tk.TclError:
+                    continue
 
         def make_card(self, parent, ttk_module, row: int, column: int, sticky: str = "nsew", padx=0, pady=0, rowspan: int = 1):
             card = GlassCard(
@@ -2722,6 +2739,7 @@ def run_gui(args: argparse.Namespace) -> int:
             step()
 
         def animate_tab_change(self, _event=None) -> None:
+            self.root.after_idle(self.refresh_tab_scroll_regions)
             if self.lightweight_motion_var.get():
                 return
 
@@ -3381,6 +3399,7 @@ def run_gui(args: argparse.Namespace) -> int:
             else:
                 self.network_controller_card.grid_remove()
                 self.network_worker_card.grid()
+            self.root.after_idle(self.refresh_tab_scroll_regions)
 
         def set_network_range_mode(self, mode: str) -> None:
             self.network_range_mode_var.set("manual" if mode == "manual" else "resume")
@@ -3396,6 +3415,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.set_localized(self.network_range_mode_label_var, "Continue: skip frames already in the output folder")
                 if hasattr(self, "network_manual_range_frame"):
                     self.network_manual_range_frame.grid_remove()
+            self.root.after_idle(self.refresh_tab_scroll_regions)
 
         def start_network_controller(self) -> None:
             if self.network_controller is not None:
