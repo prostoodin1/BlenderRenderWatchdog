@@ -37,7 +37,7 @@ from appearance import THEME_LABELS, build_palette, normalize_color, normalize_t
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from mobile_dashboard import MobileDashboardServer
-from network_render import MAX_WORKERS, NetworkWorker, RenderCoordinator
+from network_render import MAX_WORKERS, WORKER_OFFLINE_SECONDS, NetworkWorker, PairingCode, RenderCoordinator
 from process_utils import hidden_subprocess_kwargs
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
@@ -49,6 +49,13 @@ from resume_startup import (
     load_resume_state,
     mark_resume_attempt,
     windows_startup_dir,
+)
+from tailscale_support import (
+    TailscaleState,
+    download_tailscale_installer,
+    launch_tailscale_installer,
+    query_tailscale_status,
+    start_tailscale_login,
 )
 from render_sandbox import SandboxVariant, recommend_variant, run_sandbox
 from video_tools import VIDEO_FORMATS, compose_video, video_output_path
@@ -84,7 +91,7 @@ QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -1399,6 +1406,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.mobile_dashboard: MobileDashboardServer | None = None
             self.network_session: RenderSession | None = None
             self.network_history_saved = False
+            self.tailscale_state = TailscaleState(False, message="Tailscale status has not been checked")
+            self.tailscale_status_running = False
             self.latest_frame_path: Path | None = None
             self.current_analysis_issues: list[AutoFixIssue] = []
             self.current_analysis_output: Path | None = None
@@ -1492,6 +1501,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value=self.config.get("network_join_code", ""))
             self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
+            self.network_transport = "lan" if self.config.get("network_transport") == "lan" else "tailscale"
+            self.network_transport_var = tk.StringVar()
+            self.tailscale_status_var = tk.StringVar()
             self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
             self.network_range_mode_var = tk.StringVar(value=self.config.get("network_range_mode", "resume"))
             self.network_range_mode_label_var = tk.StringVar()
@@ -1499,8 +1511,15 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_manual_start_var = tk.StringVar(value=self.config.get("network_manual_start", ""))
             self.network_manual_end_var = tk.StringVar(value=self.config.get("network_manual_end", ""))
             self.network_status_var = tk.StringVar()
+            self.network_progress_var = tk.DoubleVar(value=0.0)
+            self.network_progress_text_var = tk.StringVar()
+            self.network_eta_var = tk.StringVar()
             self.worker_name_var = tk.StringVar(value=self.config.get("network_worker_name") or platform.node() or self.tr("Render worker"))
             self.set_localized(self.network_status_var, "Controller is stopped")
+            self.set_localized(self.tailscale_status_var, "Tailscale: checking…")
+            self.set_localized(self.network_progress_text_var, "Waiting for network render")
+            self.set_localized(self.network_eta_var, "No ETA yet")
+            self.update_network_transport_label()
             self.worker_range_start_var = tk.StringVar(value="")
             self.worker_range_end_var = tk.StringVar(value="")
             self.worker_samples_var = tk.StringVar(value="")
@@ -1520,6 +1539,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self.root.after(150, self.drain_log_queue)
             self.root.after(1000, self.refresh_network_state)
+            self.root.after(300, self.refresh_tailscale_status)
             self.root.after(4000, self.schedule_hardware_poll)
             self.animate_window_in()
 
@@ -1602,24 +1622,48 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.access_mode_combo.configure(values=self.localized_access_mode_labels())
             if hasattr(self, "network_access_mode_combo"):
                 self.network_access_mode_combo.configure(values=self.localized_access_mode_labels())
+            self.update_network_transport_label()
+            if hasattr(self, "network_transport_combo"):
+                self.network_transport_combo.configure(values=self.localized_network_transport_labels())
             self.save_current_config()
 
         def localized_theme_labels(self) -> tuple[str, ...]:
             return tuple(self.tr(label) for label in THEME_LABELS.values())
 
         def localized_access_mode_labels(self) -> tuple[str, ...]:
-            return (self.tr("New every start"), self.tr("Keep on this network"))
+            return (self.tr("Generate every start"), self.tr("Keep my code"))
 
         def update_access_mode_label(self) -> None:
-            label = "Keep on this network" if self.access_mode == ACCESS_MODE_PERSISTENT else "New every start"
+            label = "Keep my code" if self.access_mode == ACCESS_MODE_PERSISTENT else "Generate every start"
             self.access_mode_var.set(self.tr(label))
 
         def change_access_mode(self, _event=None) -> None:
             selected = self.access_mode_var.get().strip().casefold()
-            persistent_labels = {"keep on this network".casefold(), self.tr("Keep on this network").casefold()}
+            persistent_labels = {
+                "keep my code".casefold(),
+                self.tr("Keep my code").casefold(),
+                "keep on this network".casefold(),
+                self.tr("Keep on this network").casefold(),
+            }
             self.access_mode = ACCESS_MODE_PERSISTENT if selected in persistent_labels else "rotate"
             self.update_access_mode_label()
             self.save_current_config()
+
+        def localized_network_transport_labels(self) -> tuple[str, ...]:
+            return (self.tr("Internet via Tailscale"), self.tr("Local network (LAN)"))
+
+        def update_network_transport_label(self) -> None:
+            label = "Internet via Tailscale" if self.network_transport == "tailscale" else "Local network (LAN)"
+            self.network_transport_var.set(self.tr(label))
+
+        def change_network_transport(self, _event=None) -> None:
+            selected = self.network_transport_var.get().strip().casefold()
+            tailscale_labels = {"internet via tailscale".casefold(), self.tr("Internet via Tailscale").casefold()}
+            self.network_transport = "tailscale" if selected in tailscale_labels else "lan"
+            self.update_network_transport_label()
+            self.save_current_config()
+            if self.network_transport == "tailscale":
+                self.refresh_tailscale_status()
 
         def update_theme_label(self) -> None:
             self.theme_var.set(self.tr(THEME_LABELS[self.theme_code]))
@@ -2159,10 +2203,10 @@ def run_gui(args: argparse.Namespace) -> int:
         def build_network_tab(self, parent, ttk_module) -> None:
             parent.columnconfigure(0, weight=1)
             parent.columnconfigure(1, weight=2)
-            parent.rowconfigure(1, weight=1)
 
             role_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
             role_card.columnconfigure(0, weight=1)
+            role_card.columnconfigure(1, weight=1)
             ttk_module.Label(role_card, text="Choose this device's role", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
             ttk_module.Label(
                 role_card,
@@ -2172,21 +2216,48 @@ def run_gui(args: argparse.Namespace) -> int:
             ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 12))
             ttk_module.Button(role_card, text="Connect", command=lambda: self.set_network_role("connect")).grid(row=2, column=0, sticky="ew", padx=(0, 5))
             ttk_module.Button(role_card, text="Become main", style="Primary.TButton", command=lambda: self.set_network_role("host")).grid(row=2, column=1, sticky="ew", padx=(5, 0))
+            connection_row = ttk_module.Frame(role_card, style="Surface.TFrame")
+            connection_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+            connection_row.columnconfigure(1, weight=1)
+            ttk_module.Label(connection_row, text="Connection type", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            self.network_transport_combo = ttk_module.Combobox(
+                connection_row,
+                textvariable=self.network_transport_var,
+                values=self.localized_network_transport_labels(),
+                state="readonly",
+            )
+            self.network_transport_combo.grid(row=0, column=1, sticky="ew")
+            self.network_transport_combo.bind("<<ComboboxSelected>>", self.change_network_transport)
+            ttk_module.Label(
+                role_card,
+                textvariable=self.tailscale_status_var,
+                style="CardHint.TLabel",
+                wraplength=350,
+            ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(9, 0))
+            tailscale_actions = ttk_module.Frame(role_card, style="Surface.TFrame")
+            tailscale_actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            tailscale_actions.columnconfigure(0, weight=1)
+            tailscale_actions.columnconfigure(1, weight=1)
+            ttk_module.Button(tailscale_actions, text="Install Tailscale", command=self.install_tailscale).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            ttk_module.Button(tailscale_actions, text="Connect Tailscale", command=self.connect_tailscale).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            ttk_module.Button(tailscale_actions, text="Refresh", command=self.refresh_tailscale_status).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
             controller_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
             self.network_controller_card = controller_card._glass_shell
             controller_card.columnconfigure(0, weight=1)
             ttk_module.Label(controller_card, text="Main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-            ttk_module.Label(controller_card, text="Create a LAN code and distribute individual frames to up to five PCs.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
+            ttk_module.Label(controller_card, text="Create a private LAN or Tailscale code and distribute frames to up to five PCs.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
             ttk_module.Label(controller_card, text="Main PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
             ttk_module.Entry(controller_card, textvariable=self.controller_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
             ttk_module.Label(controller_card, text="Connection code", style="Field.TLabel").grid(row=4, column=0, sticky="w")
             ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=5, column=0, sticky="ew", pady=(4, 0))
             controller_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
             controller_actions.grid(row=6, column=0, sticky="ew", pady=(12, 0))
-            ttk_module.Button(controller_actions, text="Start controller", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0)
-            ttk_module.Button(controller_actions, text="Copy code", command=self.copy_network_code).grid(row=0, column=1, padx=(8, 0))
-            ttk_module.Button(controller_actions, text="Stop controller", command=self.stop_network_controller).grid(row=0, column=2, padx=(8, 0))
+            controller_actions.columnconfigure(0, weight=1)
+            controller_actions.columnconfigure(1, weight=1)
+            ttk_module.Button(controller_actions, text="Start controller", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            ttk_module.Button(controller_actions, text="Copy code", command=self.copy_network_code).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+            ttk_module.Button(controller_actions, text="Stop controller", command=self.stop_network_controller).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             ttk_module.Checkbutton(
                 controller_card,
                 text="Use this computer for rendering",
@@ -2249,8 +2320,20 @@ def run_gui(args: argparse.Namespace) -> int:
 
             nodes_card = self.make_card(parent, ttk_module, row=0, column=1, rowspan=2, sticky="nsew", padx=(12, 0))
             nodes_card.columnconfigure(0, weight=1)
-            nodes_card.rowconfigure(1, weight=1)
+            nodes_card.rowconfigure(2, weight=1)
             ttk_module.Label(nodes_card, text="Connected devices", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
+            network_progress = ttk_module.Frame(nodes_card, style="Surface.TFrame")
+            network_progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+            network_progress.columnconfigure(0, weight=1)
+            ttk_module.Progressbar(
+                network_progress,
+                variable=self.network_progress_var,
+                maximum=100,
+                mode="determinate",
+                style="Modern.Horizontal.TProgressbar",
+            ).grid(row=0, column=0, columnspan=2, sticky="ew")
+            ttk_module.Label(network_progress, textvariable=self.network_progress_text_var, style="CardHint.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
+            ttk_module.Label(network_progress, textvariable=self.network_eta_var, style="CardHint.TLabel").grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(6, 0))
             columns = ("name", "state", "hardware", "current", "done", "average", "samples", "range")
             self.network_tree = ttk_module.Treeview(nodes_card, columns=columns, show="headings", style="Queue.Treeview", selectmode="browse")
             headings = {"name": "Device", "state": "Status", "hardware": "Hardware", "current": "Frame", "done": "Done", "average": "Avg", "samples": "Samples", "range": "Allocation"}
@@ -2261,15 +2344,15 @@ def run_gui(args: argparse.Namespace) -> int:
             tree_y = ttk_module.Scrollbar(nodes_card, orient="vertical", command=self.network_tree.yview)
             tree_x = ttk_module.Scrollbar(nodes_card, orient="horizontal", command=self.network_tree.xview)
             self.network_tree.configure(yscrollcommand=tree_y.set, xscrollcommand=tree_x.set)
-            self.network_tree.grid(row=1, column=0, sticky="nsew")
-            tree_y.grid(row=1, column=1, sticky="ns")
-            tree_x.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            self.network_tree.grid(row=2, column=0, sticky="nsew")
+            tree_y.grid(row=2, column=1, sticky="ns")
+            tree_x.grid(row=3, column=0, sticky="ew", pady=(6, 0))
             self.network_tree.bind("<<TreeviewSelect>>", self.on_network_device_selected)
             ttk_module.Label(
                 nodes_card,
                 text="Select a device to open its render settings",
                 style="CardHint.TLabel",
-            ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+            ).grid(row=4, column=0, sticky="w", pady=(10, 0))
             self.root.after_idle(self.update_network_role_view)
             self.root.after_idle(self.update_network_range_mode_view)
 
@@ -2980,6 +3063,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.lightweight_motion_var,
                 self.resume_unfinished_var,
                 self.network_role_var,
+                self.network_transport_var,
                 self.network_use_local_var,
                 self.controller_name_var,
                 self.worker_name_var,
@@ -3038,6 +3122,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     "lightweight_motion": "1" if self.lightweight_motion_var.get() else "0",
                     "resume_unfinished_enabled": "1" if self.resume_unfinished_var.get() else "0",
                     "network_role": self.network_role_var.get(),
+                    "network_transport": self.network_transport,
                     "network_use_local": "1" if self.network_use_local_var.get() else "0",
                     "network_controller_name": self.controller_name_var.get().strip(),
                     "network_worker_name": self.worker_name_var.get().strip(),
@@ -3385,6 +3470,88 @@ def run_gui(args: argparse.Namespace) -> int:
             except Exception as error:
                 self.log_queue.put(("__SANDBOX__", [], None, str(error)))
 
+        def _apply_tailscale_state(self, state: TailscaleState) -> None:
+            self.tailscale_state = state
+            self.tailscale_status_running = False
+            if not state.installed:
+                self.set_localized(self.tailscale_status_var, "Tailscale is not installed")
+            elif state.online:
+                self.set_localized(
+                    self.tailscale_status_var,
+                    "Tailscale connected · {address}",
+                    address=state.dns_name or state.ipv4,
+                )
+            else:
+                self.set_localized(self.tailscale_status_var, "Tailscale is installed; sign in to connect")
+
+        def refresh_tailscale_status(self) -> None:
+            if self.tailscale_status_running:
+                return
+            self.tailscale_status_running = True
+            self.set_localized(self.tailscale_status_var, "Tailscale: checking…")
+
+            def check() -> None:
+                state = query_tailscale_status()
+                try:
+                    self.root.after(0, lambda: self._apply_tailscale_state(state))
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=check, name="tailscale-status", daemon=True).start()
+
+        def install_tailscale(self) -> None:
+            if self.tailscale_state.installed:
+                self.set_localized(self.tailscale_status_var, "Tailscale is already installed")
+                self.connect_tailscale()
+                return
+            if not messagebox.askyesno(
+                self.tr("Install Tailscale"),
+                self.tr("Download and run the official Tailscale installer? You will finish sign-in in your browser."),
+            ):
+                return
+            self.set_localized(self.tailscale_status_var, "Downloading Tailscale installer…")
+
+            def install() -> None:
+                try:
+                    installer = download_tailscale_installer()
+                    launch_tailscale_installer(installer)
+                    self.log_queue.put(f"[TAILSCALE] Installer launched: {installer}")
+                    self.root.after(2500, self.refresh_tailscale_status)
+                    self.root.after(9000, self.refresh_tailscale_status)
+                except Exception as error:
+                    try:
+                        self.root.after(
+                            0,
+                            lambda message=str(error): messagebox.showerror(self.tr("Tailscale installation"), message),
+                        )
+                        self.root.after(
+                            0,
+                            lambda: self.set_localized(self.tailscale_status_var, "Tailscale installation failed"),
+                        )
+                    except tk.TclError:
+                        pass
+
+            threading.Thread(target=install, name="tailscale-installer", daemon=True).start()
+
+        def connect_tailscale(self) -> None:
+            state = query_tailscale_status()
+            self._apply_tailscale_state(state)
+            if not state.installed:
+                messagebox.showinfo(
+                    self.tr("Tailscale is not installed"),
+                    self.tr("Install Tailscale on every render computer first."),
+                )
+                return
+            if state.online:
+                return
+            try:
+                start_tailscale_login(state.executable)
+                self.set_localized(self.tailscale_status_var, "Finish Tailscale sign-in in your browser…")
+                self.root.after(3000, self.refresh_tailscale_status)
+                self.root.after(10000, self.refresh_tailscale_status)
+            except Exception as error:
+                messagebox.showerror(self.tr("Tailscale connection"), str(error))
+
         def set_network_role(self, role: str) -> None:
             self.network_role_var.set("host" if role == "host" else "connect")
             self.update_network_role_view()
@@ -3422,6 +3589,15 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_code_var.set(self.network_controller.pairing_code)
                 return
             try:
+                advertised_host = None
+                if self.network_transport == "tailscale":
+                    state = query_tailscale_status()
+                    self._apply_tailscale_state(state)
+                    if not state.installed:
+                        raise RuntimeError(self.tr("Install Tailscale on every render computer first."))
+                    if not state.online or not state.ipv4:
+                        raise RuntimeError(self.tr("Connect Tailscale before starting the Internet controller."))
+                    advertised_host = state.ipv4
                 access = resolve_service_access(
                     self.access_mode,
                     self.access_key_var.get(),
@@ -3429,6 +3605,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 )
                 self.network_controller = RenderCoordinator(
                     port=access.port,
+                    advertised_host=advertised_host,
+                    transport=self.network_transport,
                     token=access.token,
                     controller_name=self.controller_name_var.get().strip() or platform.node(),
                     controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
@@ -3440,7 +3618,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_join_code_var.set(code)
                 self.set_localized(
                     self.network_status_var,
-                    "Controller ready · 0/{maximum} devices",
+                    "Controller ready via {connection} · 0/{maximum} devices",
+                    connection="Tailscale" if self.network_transport == "tailscale" else "LAN",
                     maximum=MAX_WORKERS,
                 )
             except Exception as error:
@@ -3557,6 +3736,26 @@ def run_gui(args: argparse.Namespace) -> int:
             if not code or not blender.exists():
                 messagebox.showerror(self.tr("Worker setup"), self.tr("Enter a connection code and choose blender.exe."))
                 return
+            try:
+                connection = PairingCode.decode(code)
+            except ValueError as error:
+                messagebox.showerror(self.tr("Worker connection"), str(error))
+                return
+            if connection.transport == "tailscale":
+                state = query_tailscale_status()
+                self._apply_tailscale_state(state)
+                if not state.installed:
+                    messagebox.showerror(
+                        self.tr("Tailscale is not installed"),
+                        self.tr("Install Tailscale on every render computer first."),
+                    )
+                    return
+                if not state.online:
+                    messagebox.showerror(
+                        self.tr("Tailscale connection"),
+                        self.tr("Connect Tailscale before joining this Internet render network."),
+                    )
+                    return
             if confirm and not messagebox.askyesno(
                 self.tr("Join render network"),
                 self.tr("This computer will download the project and render assigned frames. Ready to connect?"),
@@ -3787,6 +3986,31 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.set_localized(self.network_status_var, "Device was already disconnected")
             self.refresh_network_state()
 
+        def update_network_progress(self, plan: dict[str, object] | None) -> None:
+            if not plan:
+                self.network_progress_var.set(0.0)
+                self.set_localized(self.network_progress_text_var, "Waiting for network render")
+                self.set_localized(self.network_eta_var, "No ETA yet")
+                return
+            progress = max(0.0, min(100.0, float(plan.get("progress") or 0.0)))
+            completed = int(plan.get("completed") or 0)
+            total = int(plan.get("total") or 0)
+            self.network_progress_var.set(progress)
+            self.set_localized(
+                self.network_progress_text_var,
+                "Network frames {completed}/{total} · {progress}%",
+                completed=completed,
+                total=total,
+                progress=f"{progress:.0f}",
+            )
+            eta_seconds = float(plan.get("eta_seconds") or 0.0)
+            if bool(plan.get("finished")):
+                self.set_localized(self.network_eta_var, "Render complete")
+            elif eta_seconds > 0:
+                self.set_localized(self.network_eta_var, "About {time} left", time=format_duration(eta_seconds))
+            else:
+                self.set_localized(self.network_eta_var, "Measuring speed…")
+
         def refresh_network_state(self) -> None:
             controller = self.network_controller
             if hasattr(self, "network_tree"):
@@ -3798,6 +4022,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 if controller:
                     controller.controller_name = self.controller_name_var.get().strip() or platform.node()
                 snapshot = controller.status() if controller else (dict(worker.status_snapshot) if worker else {})
+                plan_snapshot = snapshot.get("plan") if isinstance(snapshot, dict) else None
+                self.update_network_progress(plan_snapshot if isinstance(plan_snapshot, dict) else None)
                 devices = snapshot.get("devices") or snapshot.get("workers") or []
                 if isinstance(devices, list):
                     for device in devices:
@@ -3828,7 +4054,7 @@ def run_gui(args: argparse.Namespace) -> int:
                             ),
                         )
                 if controller:
-                    online = sum(time.time() - worker.last_seen < 30 for worker in controller.workers.values())
+                    online = sum(time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS for worker in controller.workers.values())
                     self.set_localized(
                         self.network_status_var,
                         "Controller active · {online}/{maximum} devices",
@@ -3997,7 +4223,7 @@ def run_gui(args: argparse.Namespace) -> int:
             queue_text = ", ".join(f"{job.project_name}: {job.status}" for job in self.render_queue.jobs[:8])
             workers = 0
             if self.network_controller:
-                workers = sum(time.time() - worker.last_seen < 30 for worker in self.network_controller.workers.values())
+                workers = sum(time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS for worker in self.network_controller.workers.values())
             current_frame = self.current_render_frame
             remaining_frames = 0
             average_seconds = self.render_average_seconds

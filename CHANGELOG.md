@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.5.1 — 2026-08-16
+
+### Tailscale Internet rendering
+
+- Added Internet via Tailscale using the controller's stable private Tailscale IPv4 address.
+- Added official Windows installer download, sign-in launch and live connection-state detection.
+- Added BRW3 pairing codes that identify Tailscale transport while retaining BRW2 LAN compatibility.
+- Made persistent user-key codes stable across controller restarts and kept rotating codes available.
+
+### Network status and progress
+
+- Added a dedicated progress bar, completed-frame counter and ETA above connected devices.
+- Sent heartbeats concurrently during project download, frame rendering and result upload.
+- Prevented long-running workers from appearing Offline while their Blender process is active.
+
+### Engineering
+
+- Added isolated Tailscale status parsing and Windows integration tests.
+- Added protocol compatibility and in-render heartbeat coverage.
+- Kept Tailscale authentication outside Watchdog so account credentials are never stored by the app.
+
 ## 2.5.0 — 2026-08-15
 
 ### Progress and layout

@@ -1,6 +1,7 @@
 import base64
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -16,6 +17,12 @@ class PairingCodeTests(unittest.TestCase):
     def test_round_trip(self) -> None:
         original = PairingCode("192.168.1.5", 8765, "secret")
         self.assertEqual(PairingCode.decode(original.encode()), original)
+
+    def test_tailscale_code_carries_transport_and_keeps_legacy_compatibility(self) -> None:
+        internet = PairingCode("100.92.10.4", 48620, "secret", "tailscale")
+        self.assertTrue(internet.encode().startswith("BRW3-"))
+        self.assertEqual(PairingCode.decode(internet.encode()), internet)
+        self.assertEqual(PairingCode.decode(PairingCode("192.168.1.5", 8765, "secret").encode()).transport, "lan")
 
 
 class SchedulerTests(unittest.TestCase):
@@ -198,6 +205,46 @@ class CoordinatorHttpTests(unittest.TestCase):
                 self.assertIn("devices", worker.status_snapshot)
                 self.assertEqual(worker.status_snapshot["controller"]["host"], "127.0.0.1")
                 self.assertFalse((root / "cache").exists())
+            finally:
+                worker.stop()
+                coordinator.stop()
+
+    def test_worker_heartbeats_while_a_frame_is_rendering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blend = root / "scene.blend"
+            blend.write_bytes(b"blend")
+            fake_blender = root / "blender.exe"
+            fake_blender.touch()
+            coordinator = RenderCoordinator(bind_host="127.0.0.1", advertised_host="127.0.0.1")
+            coordinator.start()
+            coordinator.start_plan(blend, root / "renders", 1, 1)
+            heartbeat_count = 0
+            original_heartbeat = coordinator.heartbeat
+
+            def counted_heartbeat(worker_id: str):
+                nonlocal heartbeat_count
+                heartbeat_count += 1
+                return original_heartbeat(worker_id)
+
+            coordinator.heartbeat = counted_heartbeat
+
+            def render(frame, _project):
+                time.sleep(0.14)
+                output = root / f"worker_{frame}.png"
+                output.write_bytes(VALID_PNG)
+                return True, output, ""
+
+            worker = NetworkWorker(
+                coordinator.pairing_code,
+                fake_blender,
+                cache_folder=root / "cache",
+                render_frame=render,
+            )
+            try:
+                worker.run(poll_seconds=0.01, heartbeat_seconds=0.02)
+                self.assertGreaterEqual(heartbeat_count, 2)
+                self.assertTrue(coordinator.workers[worker.worker_id].public_dict()["online"])
             finally:
                 worker.stop()
                 coordinator.stop()
