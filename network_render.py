@@ -26,6 +26,8 @@ from process_utils import hidden_subprocess_kwargs
 
 
 MAX_WORKERS = 5
+WORKER_OFFLINE_SECONDS = 30
+WORKER_HEARTBEAT_SECONDS = 10.0
 IMAGE_EXTENSIONS = {".bmp", ".exr", ".hdr", ".jpeg", ".jpg", ".png", ".tga", ".tif", ".tiff", ".webp"}
 
 
@@ -89,15 +91,21 @@ class PairingCode:
     host: str
     port: int
     token: str
+    transport: str = "lan"
 
     def encode(self) -> str:
-        payload = json.dumps({"h": self.host, "p": self.port, "t": self.token}, separators=(",", ":")).encode("utf-8")
-        return "BRW2-" + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+        payload_data: dict[str, object] = {"h": self.host, "p": self.port, "t": self.token}
+        prefix = "BRW2-"
+        if self.transport != "lan":
+            payload_data["n"] = self.transport
+            prefix = "BRW3-"
+        payload = json.dumps(payload_data, separators=(",", ":")).encode("utf-8")
+        return prefix + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
     @classmethod
     def decode(cls, value: str) -> "PairingCode":
         value = value.strip()
-        if not value.startswith("BRW2-"):
+        if not value.startswith(("BRW2-", "BRW3-")):
             raise ValueError("Invalid Blender Render Watchdog connection code")
         encoded = value[5:]
         encoded += "=" * (-len(encoded) % 4)
@@ -106,11 +114,12 @@ class PairingCode:
             host = str(data["h"])
             port = int(data["p"])
             token = str(data["t"])
+            transport = str(data.get("n") or "lan").strip().lower()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid Blender Render Watchdog connection code") from error
-        if not host or not token or not 1 <= port <= 65535:
+        if not host or not token or not 1 <= port <= 65535 or transport not in {"lan", "tailscale"}:
             raise ValueError("Invalid Blender Render Watchdog connection code")
-        return cls(host, port, token)
+        return cls(host, port, token, transport)
 
 
 @dataclass(slots=True)
@@ -132,7 +141,7 @@ class WorkerState:
 
     def public_dict(self) -> dict[str, object]:
         data = asdict(self)
-        data["online"] = time.time() - self.last_seen < 30
+        data["online"] = time.time() - self.last_seen < WORKER_OFFLINE_SECONDS
         data["render_device"] = render_device_label(self.use_cpu, self.use_gpu)
         return data
 
@@ -337,6 +346,7 @@ class RenderCoordinator:
         bind_host: str = "0.0.0.0",
         port: int = 0,
         advertised_host: str | None = None,
+        transport: str = "lan",
         token: str | None = None,
         controller_name: str | None = None,
         controller_hardware: str = "",
@@ -346,6 +356,7 @@ class RenderCoordinator:
         self.bind_host = bind_host
         self.port = port
         self.advertised_host = advertised_host or lan_address()
+        self.transport = "tailscale" if transport == "tailscale" else "lan"
         self.token = token or secrets.token_urlsafe(18)
         self.controller_name = controller_name or socket.gethostname()
         self.controller_hardware = controller_hardware
@@ -362,7 +373,7 @@ class RenderCoordinator:
     def pairing_code(self) -> str:
         if not self.port:
             raise RuntimeError("Coordinator has not started")
-        return PairingCode(self.advertised_host, self.port, self.token).encode()
+        return PairingCode(self.advertised_host, self.port, self.token, self.transport).encode()
 
     def event(self, message: str) -> None:
         if self.on_event:
@@ -372,7 +383,7 @@ class RenderCoordinator:
         coordinator = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "BlenderRenderWatchdog/2.5.0"
+            server_version = "BlenderRenderWatchdog/2.5.1"
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -481,7 +492,7 @@ class RenderCoordinator:
 
     def join(self, name: str, hardware: str, use_cpu: bool = True, use_gpu: bool = True) -> tuple[dict[str, object], int]:
         with self._lock:
-            online = [worker for worker in self.workers.values() if time.time() - worker.last_seen < 30]
+            online = [worker for worker in self.workers.values() if time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS]
             if len(online) >= MAX_WORKERS:
                 return {"ok": False, "error": f"Maximum {MAX_WORKERS} workers reached"}, 409
             worker = WorkerState(
@@ -529,7 +540,7 @@ class RenderCoordinator:
             for other in self.workers.values()
             if (
                 other.worker_id != worker_id
-                and time.time() - other.last_seen < 30
+                and time.time() - other.last_seen < WORKER_OFFLINE_SECONDS
                 and (other.frame_start is not None or other.frame_end is not None)
             )
         ]
@@ -691,7 +702,7 @@ class RenderCoordinator:
         devices = [controller_row, *(worker for worker in worker_rows if worker is not local_worker)]
         return {
             "ok": True,
-            "controller": {"name": self.controller_name, "host": self.advertised_host},
+            "controller": {"name": self.controller_name, "host": self.advertised_host, "transport": self.transport},
             "workers": worker_rows,
             "devices": devices,
             "plan": self.plan.summary() if self.plan else None,
@@ -870,7 +881,28 @@ class NetworkWorker:
         error = (completed.stdout + completed.stderr)[-2000:]
         return completed.returncode == 0 and output is not None, output, error
 
-    def run(self, poll_seconds: float = 2.0, stay_connected: bool = False) -> None:
+    def _heartbeat_loop(self, finished: threading.Event, interval: float) -> None:
+        while not finished.wait(max(0.01, interval)) and not self.stop_event.is_set():
+            try:
+                heartbeat = _request_json(
+                    self.base_url + "/api/heartbeat",
+                    self.connection.token,
+                    {"worker_id": self.worker_id},
+                    timeout=15,
+                )
+                if not heartbeat.get("ok") and heartbeat.get("state") == "disconnected":
+                    self.event("[NETWORK] Disconnected by the main computer")
+                    self.stop_event.set()
+                    return
+            except (OSError, urllib.error.URLError, ConnectionError, json.JSONDecodeError) as error:
+                self.event(f"[NETWORK] Heartbeat warning: {error}")
+
+    def run(
+        self,
+        poll_seconds: float = 2.0,
+        stay_connected: bool = False,
+        heartbeat_seconds: float = WORKER_HEARTBEAT_SECONDS,
+    ) -> None:
         if not self.blender.exists():
             raise FileNotFoundError(f"Blender not found: {self.blender}")
         if not self.worker_id:
@@ -884,39 +916,53 @@ class NetworkWorker:
                     self.event("[NETWORK] Disconnected by the main computer")
                     return
                 if state == "task":
-                    plan_id = str(task["plan_id"])
-                    self._finished_plan_id = ""
-                    if self._project_id != plan_id or self._project_path is None or not self._project_path.exists():
-                        self.event("[NETWORK] Downloading project...")
-                        self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
-                    frame = int(task["frame"])
-                    samples = int(task["samples"]) if task.get("samples") is not None else None
-                    self.use_cpu = bool(task.get("use_cpu", self.use_cpu))
-                    self.use_gpu = bool(task.get("use_gpu", self.use_gpu))
-                    self.event(f"[NETWORK] Rendering frame {frame}")
-                    if self.render_frame:
-                        success, output, error = self.render_frame(frame, self._project_path)
-                    else:
-                        success, output, error = self._render_frame(
-                            frame,
-                            self._project_path,
-                            samples,
-                            self.use_cpu,
-                            self.use_gpu,
-                        )
-                    result: dict[str, object] = {
-                        "worker_id": self.worker_id,
-                        "frame": frame,
-                        "success": success,
-                        "error": "" if success else error,
-                    }
-                    if success and output:
-                        result["extension"] = output.suffix.lower()
-                        result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
+                    heartbeat_finished = threading.Event()
+                    heartbeat_thread = threading.Thread(
+                        target=self._heartbeat_loop,
+                        args=(heartbeat_finished, heartbeat_seconds),
+                        name="render-worker-heartbeat",
+                        daemon=True,
+                    )
+                    heartbeat_thread.start()
                     try:
-                        _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
+                        plan_id = str(task["plan_id"])
+                        self._finished_plan_id = ""
+                        if self._project_id != plan_id or self._project_path is None or not self._project_path.exists():
+                            self.event("[NETWORK] Downloading project...")
+                            self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
+                        frame = int(task["frame"])
+                        samples = int(task["samples"]) if task.get("samples") is not None else None
+                        self.use_cpu = bool(task.get("use_cpu", self.use_cpu))
+                        self.use_gpu = bool(task.get("use_gpu", self.use_gpu))
+                        self.event(f"[NETWORK] Rendering frame {frame}")
+                        if self.render_frame:
+                            success, output, error = self.render_frame(frame, self._project_path)
+                        else:
+                            success, output, error = self._render_frame(
+                                frame,
+                                self._project_path,
+                                samples,
+                                self.use_cpu,
+                                self.use_gpu,
+                            )
+                        result: dict[str, object] = {
+                            "worker_id": self.worker_id,
+                            "frame": frame,
+                            "success": success,
+                            "error": "" if success else error,
+                        }
+                        if success and output:
+                            result["extension"] = output.suffix.lower()
+                            result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
+                        try:
+                            _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
+                        finally:
+                            self._cleanup_frame_output(output)
                     finally:
-                        self._cleanup_frame_output(output)
+                        heartbeat_finished.set()
+                        heartbeat_thread.join(timeout=2)
+                    if self.stop_event.is_set():
+                        return
                 elif state == "finished" and not stay_connected:
                     self.cleanup_cache()
                     self.event("[NETWORK] Distributed render is complete")
