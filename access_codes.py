@@ -63,7 +63,7 @@ class MobileSyncCode:
     port: int
     token: str
     name: str
-    version: str = "2.5.0"
+    version: str = "2.5.1"
 
     def encode(self) -> str:
         payload = json.dumps(
