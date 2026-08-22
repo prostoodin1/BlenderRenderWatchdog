@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, worker_device_script
+from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, request_pairing, worker_device_script
 
 
 VALID_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -23,6 +23,11 @@ class PairingCodeTests(unittest.TestCase):
         self.assertTrue(internet.encode().startswith("BRW3-"))
         self.assertEqual(PairingCode.decode(internet.encode()), internet)
         self.assertEqual(PairingCode.decode(PairingCode("192.168.1.5", 8765, "secret").encode()).transport, "lan")
+
+    def test_ssh_code_carries_tunnel_endpoint(self) -> None:
+        ssh = PairingCode("127.0.0.1", 48620, "secret", "ssh", "render.example.com", 2222, "artist")
+        self.assertTrue(ssh.encode().startswith("BRW4-"))
+        self.assertEqual(PairingCode.decode(ssh.encode()), ssh)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -98,6 +103,64 @@ class SchedulerTests(unittest.TestCase):
 
 
 class CoordinatorHttpTests(unittest.TestCase):
+    def test_one_time_pin_issues_reusable_device_token_and_rotates(self) -> None:
+        trusted: list[tuple[str, str]] = []
+        coordinator = RenderCoordinator(
+            bind_host="127.0.0.1",
+            advertised_host="127.0.0.1",
+            require_pairing_code=True,
+            on_trusted_token=lambda token, name: trusted.append((token, name)),
+        )
+        coordinator.start()
+        try:
+            first_pin = coordinator.pairing_pin
+            code = request_pairing("127.0.0.1", coordinator.port, "Worker A", first_pin)
+            connection = PairingCode.decode(code)
+            self.assertNotEqual(connection.token, coordinator.token)
+            self.assertIn(connection.token, coordinator.trusted_tokens)
+            self.assertEqual(trusted, [(connection.token, "Worker A")])
+            self.assertNotEqual(coordinator.pairing_pin, first_pin)
+            joined = _request_json(
+                f"http://127.0.0.1:{coordinator.port}/api/join",
+                connection.token,
+                {"name": "Worker A", "hardware": "CPU"},
+            )
+            self.assertTrue(joined["ok"])
+            with self.assertRaises(ConnectionError):
+                request_pairing("127.0.0.1", coordinator.port, "Worker B", first_pin)
+        finally:
+            coordinator.stop()
+
+    def test_controller_can_allow_code_free_lan_pairing(self) -> None:
+        coordinator = RenderCoordinator(
+            bind_host="127.0.0.1",
+            advertised_host="127.0.0.1",
+            require_pairing_code=False,
+        )
+        coordinator.start()
+        try:
+            connection = PairingCode.decode(request_pairing("127.0.0.1", coordinator.port, "Trusted LAN PC"))
+            self.assertIn(connection.token, coordinator.trusted_tokens)
+        finally:
+            coordinator.stop()
+
+    def test_saved_device_token_survives_controller_restart(self) -> None:
+        token = "saved-device-token-that-is-long-enough"
+        coordinator = RenderCoordinator(
+            bind_host="127.0.0.1",
+            advertised_host="127.0.0.1",
+            trusted_tokens={token},
+        )
+        coordinator.start()
+        try:
+            joined = _request_json(
+                f"http://127.0.0.1:{coordinator.port}/api/join",
+                token,
+                {"name": "Returning worker", "hardware": "GPU"},
+            )
+            self.assertTrue(joined["ok"])
+        finally:
+            coordinator.stop()
     def test_controller_disconnects_worker_and_requeues_frame(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
