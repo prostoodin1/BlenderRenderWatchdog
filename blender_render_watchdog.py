@@ -36,8 +36,9 @@ from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
 from appearance import THEME_LABELS, build_palette, normalize_color, normalize_theme
 from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
+from lan_discovery import DiscoveredController, LanDiscoveryAdvertiser, discover_controllers
 from mobile_dashboard import MobileDashboardServer
-from network_render import MAX_WORKERS, WORKER_OFFLINE_SECONDS, NetworkWorker, PairingCode, RenderCoordinator
+from network_render import MAX_WORKERS, WORKER_OFFLINE_SECONDS, NetworkWorker, PairingCode, RenderCoordinator, request_pairing
 from process_utils import hidden_subprocess_kwargs
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
@@ -50,13 +51,7 @@ from resume_startup import (
     mark_resume_attempt,
     windows_startup_dir,
 )
-from tailscale_support import (
-    TailscaleState,
-    download_tailscale_installer,
-    launch_tailscale_installer,
-    query_tailscale_status,
-    start_tailscale_login,
-)
+from ssh_support import OpenSshState, SshTunnel, launch_openssh_install, query_openssh_state
 from render_sandbox import SandboxVariant, recommend_variant, run_sandbox
 from video_tools import VIDEO_FORMATS, compose_video, video_output_path
 
@@ -138,6 +133,34 @@ def save_config(config: dict[str, str]) -> None:
         json.dumps(config, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def load_trusted_network_devices(value: str) -> dict[str, str]:
+    try:
+        data = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(token): str(name)[:80]
+        for token, name in data.items()
+        if len(str(token)) >= 24 and str(name).strip()
+    }
+
+
+def encode_trusted_network_devices(devices: dict[str, str]) -> str:
+    return json.dumps(devices, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_saved_network_connections(value: str) -> dict[str, str]:
+    try:
+        data = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(controller_id): str(code) for controller_id, code in data.items() if str(code).startswith("BRW")}
 
 
 def send_notification(title: str, message: str) -> None:
@@ -730,7 +753,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--install-update", action="store_true", help="Install update when used with --check-update.")
     parser.add_argument("--update-source", default=None, help="Update source, default: github:prostoodin1/BlenderRenderWatchdog.")
     parser.add_argument("--write-update-cmd", action="store_true", help="Create Check Update.cmd next to the app and exit.")
-    parser.add_argument("--worker-code", default=None, help="Run as a network worker using a BRW2 connection code.")
+    parser.add_argument("--worker-code", default=None, help="Run as a network worker using a BRW2 or BRW4 connection code.")
     parser.add_argument("--worker-name", default=None, help="Display name used in network worker mode.")
     parser.add_argument("--resume-unfinished", action="store_true", help="Resume the render saved by Windows startup recovery.")
     return parser.parse_args()
@@ -1402,12 +1425,18 @@ def run_gui(args: argparse.Namespace) -> int:
             self.render_history = RenderHistory.load(HISTORY_PATH)
             self.network_controller: RenderCoordinator | None = None
             self.network_worker: NetworkWorker | None = None
+            self.network_connect_attempt = ""
+            self.lan_advertiser: LanDiscoveryAdvertiser | None = None
+            self.discovered_controllers: dict[str, DiscoveredController] = {}
+            self.lan_discovery_running = False
+            self.last_lan_discovery_at = 0.0
+            self.ssh_tunnel: SshTunnel | None = None
             self.network_device_dialog = None
             self.mobile_dashboard: MobileDashboardServer | None = None
             self.network_session: RenderSession | None = None
             self.network_history_saved = False
-            self.tailscale_state = TailscaleState(False, message="Tailscale status has not been checked")
-            self.tailscale_status_running = False
+            self.openssh_state = OpenSshState(False, message="OpenSSH status has not been checked")
+            self.openssh_status_running = False
             self.latest_frame_path: Path | None = None
             self.current_analysis_issues: list[AutoFixIssue] = []
             self.current_analysis_output: Path | None = None
@@ -1501,10 +1530,23 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value=self.config.get("network_join_code", ""))
             self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
-            self.network_transport = "lan" if self.config.get("network_transport") == "lan" else "tailscale"
+            self.network_transport = "ssh" if self.config.get("network_transport") == "ssh" else "lan"
             self.network_transport_var = tk.StringVar()
-            self.tailscale_status_var = tk.StringVar()
+            self.openssh_status_var = tk.StringVar()
             self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
+            self.network_advertise_lan_var = tk.BooleanVar(value=(self.config.get("network_advertise_lan", "1") != "0"))
+            self.network_require_pairing_var = tk.BooleanVar(value=(self.config.get("network_require_pairing", "1") != "0"))
+            self.network_controller_id = self.config.get("network_controller_id") or uuid.uuid4().hex
+            self.network_pairing_pin_var = tk.StringVar(value="—")
+            self.network_pairing_input_var = tk.StringVar(value="")
+            self.lan_controller_var = tk.StringVar(value="")
+            self.discovered_controller_labels: dict[str, DiscoveredController] = {}
+            self.trusted_network_devices = load_trusted_network_devices(self.config.get("network_trusted_devices", ""))
+            self.saved_lan_connections = load_saved_network_connections(self.config.get("network_saved_connections", ""))
+            self.ssh_host_var = tk.StringVar(value=self.config.get("ssh_host", ""))
+            self.ssh_port_var = tk.StringVar(value=self.config.get("ssh_port", "22"))
+            self.ssh_user_var = tk.StringVar(value=self.config.get("ssh_user") or os.environ.get("USERNAME", ""))
+            self.ssh_identity_var = tk.StringVar(value=self.config.get("ssh_identity", ""))
             self.network_range_mode_var = tk.StringVar(value=self.config.get("network_range_mode", "resume"))
             self.network_range_mode_label_var = tk.StringVar()
             self.controller_name_var = tk.StringVar(value=self.config.get("network_controller_name", platform.node() or "Main PC"))
@@ -1516,7 +1558,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_eta_var = tk.StringVar()
             self.worker_name_var = tk.StringVar(value=self.config.get("network_worker_name") or platform.node() or self.tr("Render worker"))
             self.set_localized(self.network_status_var, "Controller is stopped")
-            self.set_localized(self.tailscale_status_var, "Tailscale: checking…")
+            self.set_localized(self.openssh_status_var, "OpenSSH: checking…")
             self.set_localized(self.network_progress_text_var, "Waiting for network render")
             self.set_localized(self.network_eta_var, "No ETA yet")
             self.update_network_transport_label()
@@ -1539,7 +1581,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self.root.after(150, self.drain_log_queue)
             self.root.after(1000, self.refresh_network_state)
-            self.root.after(300, self.refresh_tailscale_status)
+            self.root.after(300, self.refresh_openssh_status)
+            self.root.after(500, self.refresh_lan_controllers)
             self.root.after(4000, self.schedule_hardware_poll)
             self.animate_window_in()
 
@@ -1650,20 +1693,19 @@ def run_gui(args: argparse.Namespace) -> int:
             self.save_current_config()
 
         def localized_network_transport_labels(self) -> tuple[str, ...]:
-            return (self.tr("Internet via Tailscale"), self.tr("Local network (LAN)"))
+            return (self.tr("Local network (LAN)"), self.tr("SSH tunnel"))
 
         def update_network_transport_label(self) -> None:
-            label = "Internet via Tailscale" if self.network_transport == "tailscale" else "Local network (LAN)"
+            label = "SSH tunnel" if self.network_transport == "ssh" else "Local network (LAN)"
             self.network_transport_var.set(self.tr(label))
 
         def change_network_transport(self, _event=None) -> None:
             selected = self.network_transport_var.get().strip().casefold()
-            tailscale_labels = {"internet via tailscale".casefold(), self.tr("Internet via Tailscale").casefold()}
-            self.network_transport = "tailscale" if selected in tailscale_labels else "lan"
+            ssh_labels = {"ssh tunnel".casefold(), self.tr("SSH tunnel").casefold()}
+            self.network_transport = "ssh" if selected in ssh_labels else "lan"
             self.update_network_transport_label()
             self.save_current_config()
-            if self.network_transport == "tailscale":
-                self.refresh_tailscale_status()
+            self.refresh_openssh_status()
 
         def update_theme_label(self) -> None:
             self.theme_var.set(self.tr(THEME_LABELS[self.theme_code]))
@@ -2204,90 +2246,96 @@ def run_gui(args: argparse.Namespace) -> int:
             parent.columnconfigure(0, weight=1)
             parent.columnconfigure(1, weight=2)
 
-            role_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
-            role_card.columnconfigure(0, weight=1)
-            role_card.columnconfigure(1, weight=1)
-            ttk_module.Label(role_card, text="Choose this device's role", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-            ttk_module.Label(
-                role_card,
-                text="Connect to another computer or make this computer the main render controller.",
-                style="CardHint.TLabel",
-                wraplength=350,
-            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 12))
-            ttk_module.Button(role_card, text="Connect", command=lambda: self.set_network_role("connect")).grid(row=2, column=0, sticky="ew", padx=(0, 5))
-            ttk_module.Button(role_card, text="Become main", style="Primary.TButton", command=lambda: self.set_network_role("host")).grid(row=2, column=1, sticky="ew", padx=(5, 0))
-            connection_row = ttk_module.Frame(role_card, style="Surface.TFrame")
-            connection_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 0))
-            connection_row.columnconfigure(1, weight=1)
-            ttk_module.Label(connection_row, text="Connection type", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            controller_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12))
+            self.network_controller_card = controller_card._glass_shell
+            controller_card.columnconfigure(0, weight=1)
+            controller_header = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            controller_header.grid(row=0, column=0, sticky="ew")
+            controller_header.columnconfigure(0, weight=1)
+            ttk_module.Label(controller_header, text="Main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk_module.Button(controller_header, text="Connect instead", command=lambda: self.set_network_role("connect")).grid(row=0, column=1, sticky="e")
+            ttk_module.Label(controller_card, text="Visible main PCs can be selected on the LAN. New devices pair once and reconnect automatically.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
+            ttk_module.Label(controller_card, text="Main PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
+            ttk_module.Entry(controller_card, textvariable=self.controller_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
+            host_transport = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            host_transport.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+            host_transport.columnconfigure(1, weight=1)
+            ttk_module.Label(host_transport, text="Connection type", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
             self.network_transport_combo = ttk_module.Combobox(
-                connection_row,
+                host_transport,
                 textvariable=self.network_transport_var,
                 values=self.localized_network_transport_labels(),
                 state="readonly",
             )
-            self.network_transport_combo.grid(row=0, column=1, sticky="ew")
+            self.network_transport_combo.grid(row=0, column=1, columnspan=2, sticky="ew")
             self.network_transport_combo.bind("<<ComboboxSelected>>", self.change_network_transport)
-            ttk_module.Label(
-                role_card,
-                textvariable=self.tailscale_status_var,
-                style="CardHint.TLabel",
-                wraplength=350,
-            ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(9, 0))
-            tailscale_actions = ttk_module.Frame(role_card, style="Surface.TFrame")
-            tailscale_actions.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-            tailscale_actions.columnconfigure(0, weight=1)
-            tailscale_actions.columnconfigure(1, weight=1)
-            ttk_module.Button(tailscale_actions, text="Install Tailscale", command=self.install_tailscale).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-            ttk_module.Button(tailscale_actions, text="Connect Tailscale", command=self.connect_tailscale).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-            ttk_module.Button(tailscale_actions, text="Refresh", command=self.refresh_tailscale_status).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-
-            controller_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
-            self.network_controller_card = controller_card._glass_shell
-            controller_card.columnconfigure(0, weight=1)
-            ttk_module.Label(controller_card, text="Main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-            ttk_module.Label(controller_card, text="Create a private LAN or Tailscale code and distribute frames to up to five PCs.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
-            ttk_module.Label(controller_card, text="Main PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
-            ttk_module.Entry(controller_card, textvariable=self.controller_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
-            ttk_module.Label(controller_card, text="Connection code", style="Field.TLabel").grid(row=4, column=0, sticky="w")
-            ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=5, column=0, sticky="ew", pady=(4, 0))
+            ttk_module.Label(host_transport, textvariable=self.openssh_status_var, style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            ttk_module.Button(host_transport, text="Install OpenSSH", command=self.install_openssh).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+            ttk_module.Button(host_transport, text="Refresh", command=self.refresh_openssh_status).grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+            ttk_module.Label(host_transport, text="SSH address", style="Field.TLabel").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            ttk_module.Entry(host_transport, textvariable=self.ssh_host_var).grid(row=3, column=1, sticky="ew", pady=(8, 0))
+            ttk_module.Entry(host_transport, textvariable=self.ssh_port_var, width=6).grid(row=3, column=2, padx=(8, 0), pady=(8, 0))
+            ttk_module.Label(host_transport, text="SSH user", style="Field.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            ttk_module.Entry(host_transport, textvariable=self.ssh_user_var).grid(row=4, column=1, columnspan=2, sticky="ew", pady=(8, 0))
+            ttk_module.Label(controller_card, text="Advanced connection code", style="Field.TLabel").grid(row=5, column=0, sticky="w")
+            ttk_module.Entry(controller_card, textvariable=self.network_code_var, state="readonly").grid(row=6, column=0, sticky="ew", pady=(4, 0))
             controller_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            controller_actions.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+            controller_actions.grid(row=7, column=0, sticky="ew", pady=(12, 0))
             controller_actions.columnconfigure(0, weight=1)
             controller_actions.columnconfigure(1, weight=1)
             ttk_module.Button(controller_actions, text="Start controller", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0, sticky="ew", padx=(0, 4))
             ttk_module.Button(controller_actions, text="Copy code", command=self.copy_network_code).grid(row=0, column=1, sticky="ew", padx=(4, 0))
             ttk_module.Button(controller_actions, text="Stop controller", command=self.stop_network_controller).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            lan_settings = ttk_module.Frame(controller_card, style="Surface.TFrame")
+            lan_settings.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+            lan_settings.columnconfigure(0, weight=1)
+            ttk_module.Checkbutton(
+                lan_settings,
+                text="Show this main PC on the local network",
+                variable=self.network_advertise_lan_var,
+                command=self.apply_lan_visibility_settings,
+                style="Modern.TCheckbutton",
+            ).grid(row=0, column=0, columnspan=2, sticky="w")
+            ttk_module.Checkbutton(
+                lan_settings,
+                text="Require a one-time code for new devices",
+                variable=self.network_require_pairing_var,
+                command=self.apply_lan_visibility_settings,
+                style="Modern.TCheckbutton",
+            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+            self.network_pairing_pin_label = ttk_module.Label(lan_settings, text="One-time code: {code}", style="Status.TLabel")
+            self.network_pairing_pin_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+            ttk_module.Button(lan_settings, text="New code", command=self.rotate_network_pairing_pin).grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(8, 0))
             ttk_module.Checkbutton(
                 controller_card,
                 text="Use this computer for rendering",
                 variable=self.network_use_local_var,
                 command=self.save_current_config,
                 style="Modern.TCheckbutton",
-            ).grid(row=7, column=0, sticky="w", pady=(10, 0))
+            ).grid(row=9, column=0, sticky="w", pady=(10, 0))
             range_mode = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            range_mode.grid(row=8, column=0, sticky="ew", pady=(10, 0))
+            range_mode.grid(row=10, column=0, sticky="ew", pady=(10, 0))
             range_mode.columnconfigure(0, weight=1)
             range_mode.columnconfigure(1, weight=1)
             ttk_module.Button(range_mode, text="Continue missing frames", command=lambda: self.set_network_range_mode("resume")).grid(row=0, column=0, sticky="ew", padx=(0, 4))
             ttk_module.Button(range_mode, text="Manual frame range", command=lambda: self.set_network_range_mode("manual")).grid(row=0, column=1, sticky="ew", padx=(4, 0))
             ttk_module.Label(range_mode, textvariable=self.network_range_mode_label_var, style="CardHint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
             manual_range = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            manual_range.grid(row=9, column=0, sticky="ew", pady=(8, 0))
+            manual_range.grid(row=11, column=0, sticky="ew", pady=(8, 0))
             ttk_module.Label(manual_range, text="from", style="Field.TLabel").grid(row=0, column=0)
             ttk_module.Entry(manual_range, textvariable=self.network_manual_start_var, width=9).grid(row=0, column=1, padx=(6, 10))
             ttk_module.Label(manual_range, text="to", style="Field.TLabel").grid(row=0, column=2)
             ttk_module.Entry(manual_range, textvariable=self.network_manual_end_var, width=9).grid(row=0, column=3, padx=(6, 0))
             self.network_manual_range_frame = manual_range
             render_actions = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            render_actions.grid(row=10, column=0, sticky="ew", pady=(10, 0))
+            render_actions.grid(row=12, column=0, sticky="ew", pady=(10, 0))
             render_actions.columnconfigure(0, weight=1)
             render_actions.columnconfigure(1, weight=1)
             ttk_module.Button(render_actions, text="Start render", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew", padx=(0, 4))
             ttk_module.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, sticky="ew", padx=(4, 0))
-            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=11, column=0, sticky="w", pady=(10, 0))
+            ttk_module.Label(controller_card, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=350).grid(row=13, column=0, sticky="w", pady=(10, 0))
             network_access = ttk_module.Frame(controller_card, style="Surface.TFrame")
-            network_access.grid(row=12, column=0, sticky="ew", pady=(14, 0))
+            network_access.grid(row=14, column=0, sticky="ew", pady=(14, 0))
             network_access.columnconfigure(1, weight=1)
             ttk_module.Label(network_access, text="Code behaviour", style="Field.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
             self.network_access_mode_combo = ttk_module.Combobox(
@@ -2304,21 +2352,44 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Entry(network_access, textvariable=self.access_key_var).grid(row=1, column=1, sticky="ew", pady=(8, 0))
             ttk_module.Button(network_access, text="New key", command=self.create_new_access_key).grid(row=1, column=2, padx=(8, 0), pady=(8, 0))
 
-            worker_card = self.make_card(parent, ttk_module, row=1, column=0, sticky="nsew", padx=(0, 12))
+            worker_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew", padx=(0, 12))
             self.network_worker_card = worker_card._glass_shell
             worker_card.columnconfigure(0, weight=1)
-            ttk_module.Label(worker_card, text="Connect to main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-            ttk_module.Label(worker_card, text="Enter the code on another computer. The project is downloaded automatically.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
+            worker_header = ttk_module.Frame(worker_card, style="Surface.TFrame")
+            worker_header.grid(row=0, column=0, sticky="ew")
+            worker_header.columnconfigure(0, weight=1)
+            ttk_module.Label(worker_header, text="Connect to main computer", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ttk_module.Button(worker_header, text="Become main", command=lambda: self.set_network_role("host")).grid(row=0, column=1, sticky="e")
+            ttk_module.Label(worker_card, text="Select a visible main PC. A saved trusted connection reconnects without asking for a code again.", style="CardHint.TLabel", wraplength=350).grid(row=1, column=0, sticky="w", pady=(3, 12))
             ttk_module.Label(worker_card, text="This PC name", style="Field.TLabel").grid(row=2, column=0, sticky="w")
             ttk_module.Entry(worker_card, textvariable=self.worker_name_var).grid(row=3, column=0, sticky="ew", pady=(4, 10))
-            ttk_module.Label(worker_card, text="Connection code", style="Field.TLabel").grid(row=4, column=0, sticky="w")
-            ttk_module.Entry(worker_card, textvariable=self.network_join_code_var).grid(row=5, column=0, sticky="ew", pady=(4, 10))
+            ttk_module.Label(worker_card, text="Main PCs on local network", style="Field.TLabel").grid(row=4, column=0, sticky="w")
+            lan_choice = ttk_module.Frame(worker_card, style="Surface.TFrame")
+            lan_choice.grid(row=5, column=0, sticky="ew", pady=(4, 8))
+            lan_choice.columnconfigure(0, weight=1)
+            self.lan_controller_combo = ttk_module.Combobox(lan_choice, textvariable=self.lan_controller_var, state="readonly")
+            self.lan_controller_combo.grid(row=0, column=0, sticky="ew")
+            ttk_module.Button(lan_choice, text="Refresh", command=self.refresh_lan_controllers).grid(row=0, column=1, padx=(8, 0))
+            ttk_module.Label(worker_card, text="One-time code (only for the first connection)", style="Field.TLabel").grid(row=6, column=0, sticky="w")
+            ttk_module.Entry(worker_card, textvariable=self.network_pairing_input_var).grid(row=7, column=0, sticky="ew", pady=(4, 8))
+            ttk_module.Button(worker_card, text="Connect selected PC", style="Primary.TButton", command=self.connect_selected_lan_controller).grid(row=8, column=0, sticky="ew")
+            ttk_module.Label(worker_card, text="Saved or SSH connection code", style="Field.TLabel").grid(row=9, column=0, sticky="w", pady=(12, 0))
+            ttk_module.Entry(worker_card, textvariable=self.network_join_code_var).grid(row=10, column=0, sticky="ew", pady=(4, 10))
             worker_actions = ttk_module.Frame(worker_card, style="Surface.TFrame")
-            worker_actions.grid(row=6, column=0, sticky="ew")
+            worker_actions.grid(row=11, column=0, sticky="ew")
             ttk_module.Button(worker_actions, text="Connect", style="Primary.TButton", command=self.start_network_worker).grid(row=0, column=0)
             ttk_module.Button(worker_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=1, padx=(8, 0))
+            worker_ssh = ttk_module.Frame(worker_card, style="Surface.TFrame")
+            worker_ssh.grid(row=12, column=0, sticky="ew", pady=(12, 0))
+            worker_ssh.columnconfigure(1, weight=1)
+            ttk_module.Label(worker_ssh, textvariable=self.openssh_status_var, style="CardHint.TLabel", wraplength=350).grid(row=0, column=0, columnspan=3, sticky="w")
+            ttk_module.Button(worker_ssh, text="Install OpenSSH", command=self.install_openssh).grid(row=1, column=0, sticky="ew", pady=(8, 0))
+            ttk_module.Button(worker_ssh, text="Refresh", command=self.refresh_openssh_status).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+            ttk_module.Label(worker_ssh, text="SSH private key", style="Field.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+            ttk_module.Entry(worker_ssh, textvariable=self.ssh_identity_var).grid(row=2, column=1, sticky="ew", pady=(8, 0))
+            ttk_module.Button(worker_ssh, text="Browse", command=self.browse_ssh_identity).grid(row=2, column=2, padx=(8, 0), pady=(8, 0))
 
-            nodes_card = self.make_card(parent, ttk_module, row=0, column=1, rowspan=2, sticky="nsew", padx=(12, 0))
+            nodes_card = self.make_card(parent, ttk_module, row=0, column=1, sticky="nsew", padx=(12, 0))
             nodes_card.columnconfigure(0, weight=1)
             nodes_card.rowconfigure(2, weight=1)
             ttk_module.Label(nodes_card, text="Connected devices", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
@@ -2355,6 +2426,7 @@ def run_gui(args: argparse.Namespace) -> int:
             ).grid(row=4, column=0, sticky="w", pady=(10, 0))
             self.root.after_idle(self.update_network_role_view)
             self.root.after_idle(self.update_network_range_mode_view)
+            self.root.after_idle(self.update_pairing_pin_label)
 
         def build_insights_tab(self, parent, ttk_module) -> None:
             parent.columnconfigure(0, weight=1)
@@ -3065,9 +3137,15 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_role_var,
                 self.network_transport_var,
                 self.network_use_local_var,
+                self.network_advertise_lan_var,
+                self.network_require_pairing_var,
                 self.controller_name_var,
                 self.worker_name_var,
                 self.network_join_code_var,
+                self.ssh_host_var,
+                self.ssh_port_var,
+                self.ssh_user_var,
+                self.ssh_identity_var,
                 self.network_range_mode_var,
                 self.network_manual_start_var,
                 self.network_manual_end_var,
@@ -3124,12 +3202,21 @@ def run_gui(args: argparse.Namespace) -> int:
                     "network_role": self.network_role_var.get(),
                     "network_transport": self.network_transport,
                     "network_use_local": "1" if self.network_use_local_var.get() else "0",
+                    "network_advertise_lan": "1" if self.network_advertise_lan_var.get() else "0",
+                    "network_require_pairing": "1" if self.network_require_pairing_var.get() else "0",
+                    "network_controller_id": self.network_controller_id,
+                    "network_trusted_devices": encode_trusted_network_devices(self.trusted_network_devices),
+                    "network_saved_connections": json.dumps(self.saved_lan_connections, ensure_ascii=False, separators=(",", ":")),
                     "network_controller_name": self.controller_name_var.get().strip(),
                     "network_worker_name": self.worker_name_var.get().strip(),
                     "network_join_code": self.network_join_code_var.get().strip(),
                     "network_range_mode": self.network_range_mode_var.get(),
                     "network_manual_start": self.network_manual_start_var.get().strip(),
                     "network_manual_end": self.network_manual_end_var.get().strip(),
+                    "ssh_host": self.ssh_host_var.get().strip(),
+                    "ssh_port": self.ssh_port_var.get().strip(),
+                    "ssh_user": self.ssh_user_var.get().strip(),
+                    "ssh_identity": self.ssh_identity_var.get().strip(),
                     "access_mode": self.access_mode,
                     "access_key": self.access_key_var.get().strip(),
                 }
@@ -3470,87 +3557,166 @@ def run_gui(args: argparse.Namespace) -> int:
             except Exception as error:
                 self.log_queue.put(("__SANDBOX__", [], None, str(error)))
 
-        def _apply_tailscale_state(self, state: TailscaleState) -> None:
-            self.tailscale_state = state
-            self.tailscale_status_running = False
-            if not state.installed:
-                self.set_localized(self.tailscale_status_var, "Tailscale is not installed")
-            elif state.online:
-                self.set_localized(
-                    self.tailscale_status_var,
-                    "Tailscale connected · {address}",
-                    address=state.dns_name or state.ipv4,
-                )
+        def _apply_openssh_state(self, state: OpenSshState) -> None:
+            self.openssh_state = state
+            self.openssh_status_running = False
+            if state.server_running:
+                self.set_localized(self.openssh_status_var, "OpenSSH client and server are ready")
+            elif state.server_installed:
+                self.set_localized(self.openssh_status_var, "OpenSSH server is installed but stopped")
+            elif state.client_installed:
+                self.set_localized(self.openssh_status_var, "OpenSSH client is ready")
             else:
-                self.set_localized(self.tailscale_status_var, "Tailscale is installed; sign in to connect")
+                self.set_localized(self.openssh_status_var, "OpenSSH is not installed")
 
-        def refresh_tailscale_status(self) -> None:
-            if self.tailscale_status_running:
+        def refresh_openssh_status(self) -> None:
+            if self.openssh_status_running:
                 return
-            self.tailscale_status_running = True
-            self.set_localized(self.tailscale_status_var, "Tailscale: checking…")
+            self.openssh_status_running = True
+            self.set_localized(self.openssh_status_var, "OpenSSH: checking…")
 
             def check() -> None:
-                state = query_tailscale_status()
+                state = query_openssh_state()
                 try:
-                    self.root.after(0, lambda: self._apply_tailscale_state(state))
+                    self.root.after(0, lambda: self._apply_openssh_state(state))
                 except tk.TclError:
                     pass
 
-            threading.Thread(target=check, name="tailscale-status", daemon=True).start()
+            threading.Thread(target=check, name="openssh-status", daemon=True).start()
 
-        def install_tailscale(self) -> None:
-            if self.tailscale_state.installed:
-                self.set_localized(self.tailscale_status_var, "Tailscale is already installed")
-                self.connect_tailscale()
-                return
-            if not messagebox.askyesno(
-                self.tr("Install Tailscale"),
-                self.tr("Download and run the official Tailscale installer? You will finish sign-in in your browser."),
-            ):
-                return
-            self.set_localized(self.tailscale_status_var, "Downloading Tailscale installer…")
-
-            def install() -> None:
-                try:
-                    installer = download_tailscale_installer()
-                    launch_tailscale_installer(installer)
-                    self.log_queue.put(f"[TAILSCALE] Installer launched: {installer}")
-                    self.root.after(2500, self.refresh_tailscale_status)
-                    self.root.after(9000, self.refresh_tailscale_status)
-                except Exception as error:
-                    try:
-                        self.root.after(
-                            0,
-                            lambda message=str(error): messagebox.showerror(self.tr("Tailscale installation"), message),
-                        )
-                        self.root.after(
-                            0,
-                            lambda: self.set_localized(self.tailscale_status_var, "Tailscale installation failed"),
-                        )
-                    except tk.TclError:
-                        pass
-
-            threading.Thread(target=install, name="tailscale-installer", daemon=True).start()
-
-        def connect_tailscale(self) -> None:
-            state = query_tailscale_status()
-            self._apply_tailscale_state(state)
-            if not state.installed:
-                messagebox.showinfo(
-                    self.tr("Tailscale is not installed"),
-                    self.tr("Install Tailscale on every render computer first."),
-                )
-                return
-            if state.online:
+        def install_openssh(self) -> None:
+            install_server = self.network_role_var.get() == "host"
+            prompt = "Install the Windows OpenSSH client and server?" if install_server else "Install the Windows OpenSSH client?"
+            if not messagebox.askyesno(self.tr("Install OpenSSH"), self.tr(prompt)):
                 return
             try:
-                start_tailscale_login(state.executable)
-                self.set_localized(self.tailscale_status_var, "Finish Tailscale sign-in in your browser…")
-                self.root.after(3000, self.refresh_tailscale_status)
-                self.root.after(10000, self.refresh_tailscale_status)
+                launch_openssh_install(install_server)
+                self.set_localized(self.openssh_status_var, "OpenSSH installer started with administrator rights")
+                self.root.after(5000, self.refresh_openssh_status)
+                self.root.after(15000, self.refresh_openssh_status)
             except Exception as error:
-                messagebox.showerror(self.tr("Tailscale connection"), str(error))
+                messagebox.showerror(self.tr("OpenSSH installation"), str(error))
+
+        def browse_ssh_identity(self) -> None:
+            path = filedialog.askopenfilename(title=self.tr("Choose SSH private key"), filetypes=[("SSH key", "*"), ("All files", "*.*")])
+            if path:
+                self.ssh_identity_var.set(path)
+
+        def save_trusted_network_device(self, token: str, name: str) -> None:
+            self.trusted_network_devices[token] = name
+            try:
+                self.root.after(0, self.save_current_config)
+            except tk.TclError:
+                pass
+
+        def update_pairing_pin_label(self) -> None:
+            code = self.network_pairing_pin_var.get() if self.network_require_pairing_var.get() else self.tr("Not required")
+            if hasattr(self, "network_pairing_pin_label"):
+                self.network_pairing_pin_label.configure(text=self.tr("One-time code: {code}", code=code))
+
+        def rotate_network_pairing_pin(self) -> None:
+            if self.network_controller:
+                self.network_pairing_pin_var.set(self.network_controller.rotate_pairing_pin())
+            self.update_pairing_pin_label()
+
+        def _stop_lan_advertiser(self) -> None:
+            if self.lan_advertiser:
+                self.lan_advertiser.stop()
+            self.lan_advertiser = None
+
+        def _start_lan_advertiser(self) -> None:
+            self._stop_lan_advertiser()
+            controller = self.network_controller
+            if not controller or controller.transport != "lan" or not self.network_advertise_lan_var.get():
+                return
+            announcement = DiscoveredController(
+                self.network_controller_id,
+                controller.controller_name,
+                controller.advertised_host,
+                controller.port,
+                controller.require_pairing_code,
+                APP_VERSION,
+            )
+            try:
+                self.lan_advertiser = LanDiscoveryAdvertiser(announcement)
+                self.lan_advertiser.start()
+            except OSError as error:
+                self.lan_advertiser = None
+                self.log_queue.put(f"[NETWORK] LAN discovery unavailable: {error}")
+
+        def apply_lan_visibility_settings(self) -> None:
+            if self.network_controller:
+                self.network_controller.require_pairing_code = self.network_require_pairing_var.get()
+                if self.network_controller.require_pairing_code and time.time() > self.network_controller.pairing_pin_expires_at:
+                    self.network_controller.rotate_pairing_pin()
+                self._start_lan_advertiser()
+            self.update_pairing_pin_label()
+            self.save_current_config()
+
+        def refresh_lan_controllers(self) -> None:
+            if self.lan_discovery_running:
+                return
+            self.lan_discovery_running = True
+            self.last_lan_discovery_at = time.monotonic()
+
+            def scan() -> None:
+                controllers = discover_controllers(timeout=0.8)
+                try:
+                    self.root.after(0, lambda: self._apply_lan_controllers(controllers))
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=scan, name="lan-controller-scan", daemon=True).start()
+
+        def _apply_lan_controllers(self, controllers: list[DiscoveredController]) -> None:
+            self.lan_discovery_running = False
+            self.discovered_controllers = {item.controller_id: item for item in controllers}
+            labels: dict[str, DiscoveredController] = {}
+            for item in controllers:
+                lock = self.tr("Code required") if item.requires_code and item.controller_id not in self.saved_lan_connections else self.tr("Ready")
+                labels[f"{item.name} · {item.host}:{item.port} · {lock}"] = item
+            self.discovered_controller_labels = labels
+            if hasattr(self, "lan_controller_combo"):
+                self.lan_controller_combo.configure(values=tuple(labels))
+            current = self.lan_controller_var.get()
+            if current not in labels:
+                self.lan_controller_var.set(next(iter(labels), ""))
+
+        def connect_selected_lan_controller(self) -> None:
+            controller = self.discovered_controller_labels.get(self.lan_controller_var.get())
+            if controller is None:
+                messagebox.showinfo(self.tr("Local network"), self.tr("No main PC was found. Refresh the list or use an advanced connection code."))
+                return
+            saved = self.saved_lan_connections.get(controller.controller_id, "")
+            if saved:
+                try:
+                    old = PairingCode.decode(saved)
+                    code = PairingCode(controller.host, controller.port, old.token, "lan").encode()
+                    self.network_join_code_var.set(code)
+                    self.start_network_worker()
+                    return
+                except ValueError:
+                    self.saved_lan_connections.pop(controller.controller_id, None)
+            pin = self.network_pairing_input_var.get().strip()
+            if controller.requires_code and not pin:
+                messagebox.showinfo(self.tr("One-time code"), self.tr("Enter the one-time code shown on the main PC."))
+                return
+
+            def pair() -> None:
+                try:
+                    code = request_pairing(controller.host, controller.port, self.worker_name_var.get().strip() or platform.node(), pin)
+                    self.root.after(0, lambda: self._finish_lan_pairing(controller, code))
+                except Exception as error:
+                    self.root.after(0, lambda message=str(error): messagebox.showerror(self.tr("Worker connection"), message))
+
+            threading.Thread(target=pair, name="lan-pairing", daemon=True).start()
+
+        def _finish_lan_pairing(self, controller: DiscoveredController, code: str) -> None:
+            self.saved_lan_connections[controller.controller_id] = code
+            self.network_join_code_var.set(code)
+            self.network_pairing_input_var.set("")
+            self.save_current_config()
+            self.start_network_worker()
 
         def set_network_role(self, role: str) -> None:
             self.network_role_var.set("host" if role == "host" else "connect")
@@ -3590,24 +3756,39 @@ def run_gui(args: argparse.Namespace) -> int:
                 return
             try:
                 advertised_host = None
-                if self.network_transport == "tailscale":
-                    state = query_tailscale_status()
-                    self._apply_tailscale_state(state)
-                    if not state.installed:
-                        raise RuntimeError(self.tr("Install Tailscale on every render computer first."))
-                    if not state.online or not state.ipv4:
-                        raise RuntimeError(self.tr("Connect Tailscale before starting the Internet controller."))
-                    advertised_host = state.ipv4
+                bind_host = "0.0.0.0"
+                ssh_host = ""
+                ssh_port = 22
+                ssh_user = ""
+                if self.network_transport == "ssh":
+                    state = query_openssh_state()
+                    self._apply_openssh_state(state)
+                    if os.name == "nt" and not state.server_running:
+                        raise RuntimeError(self.tr("Install and start OpenSSH Server on the main PC first."))
+                    ssh_host = self.ssh_host_var.get().strip()
+                    ssh_user = self.ssh_user_var.get().strip()
+                    ssh_port = int(self.ssh_port_var.get().strip() or "22")
+                    if not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535:
+                        raise ValueError(self.tr("Enter a valid SSH address, port, and user."))
+                    bind_host = "127.0.0.1"
+                    advertised_host = "127.0.0.1"
                 access = resolve_service_access(
                     self.access_mode,
                     self.access_key_var.get(),
                     "network",
                 )
                 self.network_controller = RenderCoordinator(
+                    bind_host=bind_host,
                     port=access.port,
                     advertised_host=advertised_host,
                     transport=self.network_transport,
                     token=access.token,
+                    ssh_host=ssh_host,
+                    ssh_port=ssh_port,
+                    ssh_user=ssh_user,
+                    require_pairing_code=self.network_require_pairing_var.get(),
+                    trusted_tokens=set(self.trusted_network_devices),
+                    on_trusted_token=self.save_trusted_network_device,
                     controller_name=self.controller_name_var.get().strip() or platform.node(),
                     controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     on_event=lambda message: self.log_queue.put(message),
@@ -3616,10 +3797,13 @@ def run_gui(args: argparse.Namespace) -> int:
                 code = self.network_controller.start()
                 self.network_code_var.set(code)
                 self.network_join_code_var.set(code)
+                self.network_pairing_pin_var.set(self.network_controller.pairing_pin)
+                self.update_pairing_pin_label()
+                self._start_lan_advertiser()
                 self.set_localized(
                     self.network_status_var,
                     "Controller ready via {connection} · 0/{maximum} devices",
-                    connection="Tailscale" if self.network_transport == "tailscale" else "LAN",
+                    connection="SSH" if self.network_transport == "ssh" else "LAN",
                     maximum=MAX_WORKERS,
                 )
             except Exception as error:
@@ -3627,12 +3811,15 @@ def run_gui(args: argparse.Namespace) -> int:
                 messagebox.showerror(self.tr("Network controller"), str(error))
 
         def stop_network_controller(self) -> None:
+            self._stop_lan_advertiser()
             if self.network_controller:
                 if self.network_controller.plan:
                     self.network_controller.plan.stop()
                 self.network_controller.stop()
             self.network_controller = None
             self.network_code_var.set("")
+            self.network_pairing_pin_var.set("—")
+            self.update_pairing_pin_label()
             self.set_localized(self.network_status_var, "Controller is stopped")
 
         def stop_network_render(self) -> None:
@@ -3660,7 +3847,9 @@ def run_gui(args: argparse.Namespace) -> int:
             if self.network_controller is None:
                 return
             if self.network_use_local_var.get() and self.network_worker is None:
-                self.network_join_code_var.set(self.network_controller.pairing_code)
+                self.network_join_code_var.set(
+                    PairingCode("127.0.0.1", self.network_controller.port, self.network_controller.token, "lan").encode()
+                )
                 self.start_network_worker(confirm=False, name_override=self.controller_name_var.get().strip())
             blender, blend, manual_output = paths
             settings = query_scene_settings(blender, blend, log=lambda message: self.log(message)) or {}
@@ -3729,7 +3918,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.log_queue.put(("__NETWORK_FRAME__", frame, str(path), float(_duration)))
 
         def start_network_worker(self, confirm: bool = True, name_override: str | None = None) -> None:
-            if self.network_worker is not None:
+            if self.network_worker is not None or self.network_connect_attempt:
                 return
             code = self.network_join_code_var.get().strip()
             blender = Path(self.blender_var.get().strip().strip('"'))
@@ -3741,31 +3930,65 @@ def run_gui(args: argparse.Namespace) -> int:
             except ValueError as error:
                 messagebox.showerror(self.tr("Worker connection"), str(error))
                 return
-            if connection.transport == "tailscale":
-                state = query_tailscale_status()
-                self._apply_tailscale_state(state)
-                if not state.installed:
-                    messagebox.showerror(
-                        self.tr("Tailscale is not installed"),
-                        self.tr("Install Tailscale on every render computer first."),
-                    )
-                    return
-                if not state.online:
-                    messagebox.showerror(
-                        self.tr("Tailscale connection"),
-                        self.tr("Connect Tailscale before joining this Internet render network."),
-                    )
-                    return
             if confirm and not messagebox.askyesno(
                 self.tr("Join render network"),
                 self.tr("This computer will download the project and render assigned frames. Ready to connect?"),
             ):
                 return
+            worker_name = name_override or self.worker_name_var.get().strip() or platform.node()
+            if connection.transport != "ssh":
+                self._finish_network_worker_connection(code, blender, worker_name)
+                return
+            state = query_openssh_state()
+            self._apply_openssh_state(state)
+            if not state.client_installed:
+                messagebox.showerror(self.tr("Worker connection"), self.tr("Install the OpenSSH client on this PC first."))
+                return
+            identity_text = self.ssh_identity_var.get().strip().strip('"')
+            identity = Path(identity_text) if identity_text else None
+            if identity is not None and not identity.is_file():
+                messagebox.showerror(self.tr("Worker connection"), self.tr("SSH private key was not found."))
+                return
+            attempt = uuid.uuid4().hex
+            self.network_connect_attempt = attempt
+            self.set_localized(self.openssh_status_var, "Connecting SSH tunnel…")
+
+            def connect_ssh() -> None:
+                tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port, identity)
+                try:
+                    local_port = tunnel.start()
+                    worker_code = PairingCode("127.0.0.1", local_port, connection.token, "lan").encode()
+                    self.root.after(0, lambda: self._finish_ssh_worker_connection(attempt, tunnel, worker_code, blender, worker_name))
+                except Exception as error:
+                    tunnel.stop()
+                    try:
+                        self.root.after(0, lambda message=str(error): self._fail_ssh_worker_connection(attempt, message))
+                    except tk.TclError:
+                        pass
+
+            threading.Thread(target=connect_ssh, name="ssh-tunnel-connect", daemon=True).start()
+
+        def _finish_ssh_worker_connection(self, attempt: str, tunnel: SshTunnel, code: str, blender: Path, worker_name: str) -> None:
+            if self.network_connect_attempt != attempt:
+                tunnel.stop()
+                return
+            self.network_connect_attempt = ""
+            self.ssh_tunnel = tunnel
+            self.set_localized(self.openssh_status_var, "SSH tunnel connected")
+            self._finish_network_worker_connection(code, blender, worker_name)
+
+        def _fail_ssh_worker_connection(self, attempt: str, message: str) -> None:
+            if self.network_connect_attempt != attempt:
+                return
+            self.network_connect_attempt = ""
+            messagebox.showerror(self.tr("Worker connection"), message)
+
+        def _finish_network_worker_connection(self, code: str, blender: Path, worker_name: str) -> None:
             try:
                 self.network_worker = NetworkWorker(
                     code,
                     blender,
-                    name=name_override or self.worker_name_var.get().strip() or platform.node(),
+                    name=worker_name,
                     hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     cache_folder=app_config_dir() / "network_worker",
                     on_event=lambda message: self.log_queue.put(message),
@@ -3775,6 +3998,9 @@ def run_gui(args: argparse.Namespace) -> int:
                 worker = self.network_worker
                 threading.Thread(target=self.run_network_worker, args=(worker,), daemon=True).start()
             except Exception as error:
+                if self.ssh_tunnel:
+                    self.ssh_tunnel.stop()
+                self.ssh_tunnel = None
                 self.network_worker = None
                 messagebox.showerror(self.tr("Worker connection"), str(error))
 
@@ -3787,18 +4013,27 @@ def run_gui(args: argparse.Namespace) -> int:
                 worker.cleanup_cache()
                 if self.network_worker is worker:
                     self.network_worker = None
+                if self.ssh_tunnel:
+                    self.ssh_tunnel.stop()
+                    self.ssh_tunnel = None
 
         def start_local_network_worker(self) -> None:
             if self.network_controller is None:
                 self.start_network_controller()
             if self.network_controller:
-                self.network_join_code_var.set(self.network_controller.pairing_code)
+                self.network_join_code_var.set(
+                    PairingCode("127.0.0.1", self.network_controller.port, self.network_controller.token, "lan").encode()
+                )
                 self.start_network_worker(name_override=self.controller_name_var.get().strip())
 
         def stop_network_worker(self) -> None:
+            self.network_connect_attempt = ""
             if self.network_worker:
                 self.network_worker.stop()
             self.network_worker = None
+            if self.ssh_tunnel:
+                self.ssh_tunnel.stop()
+            self.ssh_tunnel = None
 
         def apply_network_allocation(self) -> None:
             if not self.network_controller:
@@ -4013,6 +4248,13 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def refresh_network_state(self) -> None:
             controller = self.network_controller
+            if controller:
+                if controller.require_pairing_code and time.time() > controller.pairing_pin_expires_at:
+                    controller.rotate_pairing_pin()
+                self.network_pairing_pin_var.set(controller.pairing_pin)
+            self.update_pairing_pin_label()
+            if self.network_role_var.get() == "connect" and time.monotonic() - self.last_lan_discovery_at >= 5:
+                self.refresh_lan_controllers()
             if hasattr(self, "network_tree"):
                 self.network_device_worker_ids: dict[str, str] = {}
                 self.network_device_rows: dict[str, dict[str, object]] = {}
@@ -4976,10 +5218,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.save_current_config()
             self.save_render_queue()
             self.save_render_history()
-            if self.network_worker:
-                self.network_worker.stop()
-            if self.network_controller:
-                self.network_controller.stop()
+            self.stop_network_worker()
+            self.stop_network_controller()
             if self.mobile_dashboard:
                 self.mobile_dashboard.stop()
             self.root.destroy()
@@ -5006,8 +5246,19 @@ def main() -> int:
             print("Blender executable is required in worker mode.", flush=True)
             return 2
         cpu, gpus = detect_hardware()
+        worker_code = args.worker_code
+        cli_ssh_tunnel: SshTunnel | None = None
+        connection = PairingCode.decode(args.worker_code)
+        if connection.transport == "ssh":
+            cli_ssh_tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port)
+            try:
+                local_port = cli_ssh_tunnel.start()
+            except Exception as error:
+                print(f"Could not start SSH tunnel: {error}", flush=True)
+                return 2
+            worker_code = PairingCode("127.0.0.1", local_port, connection.token, "lan").encode()
         worker = NetworkWorker(
-            args.worker_code,
+            worker_code,
             blender,
             name=args.worker_name,
             hardware=f"{cpu}; {'; '.join(gpus)}",
@@ -5022,6 +5273,8 @@ def main() -> int:
             return 130
         finally:
             worker.cleanup_cache()
+            if cli_ssh_tunnel:
+                cli_ssh_tunnel.stop()
 
     if not args.blend or not args.frames:
         return run_gui(args)
