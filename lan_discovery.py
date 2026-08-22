@@ -21,7 +21,7 @@ class DiscoveredController:
     host: str
     port: int
     requires_code: bool
-    version: str = "2.5.1"
+    version: str = "2.6.0"
 
 
 def encode_announcement(controller: DiscoveredController) -> bytes:

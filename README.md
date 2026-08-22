@@ -1,10 +1,10 @@
-# Blender Render Watchdog 2.5.1
+# Blender Render Watchdog 2.6.0
 
-> В следующем обновлении локальная сеть работает без Tailscale: главные ПК находятся автоматически, новый worker вводит короткий код только один раз, а повторные подключения используют сохранённое доверие. Для подключения через интернет добавлен опциональный SSH-туннель.
+> Версия 2.6.0 делает LAN основным режимом без Tailscale: главные ПК находятся автоматически, новый worker вводит короткий код только один раз, а повторные подключения используют сохранённое доверие. Для подключения через интернет добавлен опциональный SSH-туннель.
 
-![Blender Render Watchdog 2.5.1 — рендер](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.5.1/BlenderRenderWatchdog-2.5.1-Render.png)
+![Blender Render Watchdog 2.6.0 — рендер](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.6.0/BlenderRenderWatchdog-2.6.0-Render.png)
 
-![Blender Render Watchdog 2.5.1 — сеть](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.5.1/BlenderRenderWatchdog-2.5.1-Network.png)
+![Blender Render Watchdog 2.6.0 — сеть](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.6.0/BlenderRenderWatchdog-2.6.0-Network.png)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -18,7 +18,7 @@
 
 Windows-приложение для надёжного фонового рендера Blender. Watchdog продолжает анимацию после сбоя, управляет очередью проектов, распределяет кадры между компьютерами и показывает состояние рендера на телефоне.
 
-## Следующее обновление
+## Что нового в 2.6.0
 
 - LAN стал основным режимом и не требует установки сторонних сетевых программ;
 - главный ПК можно показывать или скрывать в локальной сети;

@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.6.0 — 2026-08-22
+
+### Local network pairing
+
+- Made LAN the default transport with no Tailscale installation requirement.
+- Added automatic discovery of visible main PCs on the local broadcast network.
+- Added optional six-digit one-time pairing codes and an explicit code-free mode for trusted LANs.
+- Issued a unique persistent token to every approved device so later reconnects do not ask for the code again.
+- Kept discovery announcements free of access tokens and rate-limited invalid pairing attempts.
+
+### OpenSSH transport
+
+- Replaced the Tailscale UI and dependency with optional Windows OpenSSH Client/Server installation.
+- Added BRW4 connection codes carrying the SSH endpoint without storing a password.
+- Added hidden, asynchronous SSH local forwarding using a private key or `ssh-agent`.
+- Kept legacy BRW2/BRW3 decoding compatibility while moving new connections to LAN and SSH.
+
+### Interface and engineering
+
+- Added main-PC visibility and pairing-policy controls to the Network tab.
+- Added a discovered-controller picker and saved trusted reconnect flow for workers.
+- Reworked the Network layout after visual QA to keep role controls visible and SSH settings scrollable.
+- Expanded the automated suite to 78 tests covering discovery, one-time pairing, trusted reconnects and OpenSSH detection.
+
 ## 2.5.1 — 2026-08-16
 
 ### Tailscale Internet rendering
