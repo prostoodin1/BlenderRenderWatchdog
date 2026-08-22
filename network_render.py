@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import secrets
@@ -92,11 +93,17 @@ class PairingCode:
     port: int
     token: str
     transport: str = "lan"
+    ssh_host: str = ""
+    ssh_port: int = 22
+    ssh_user: str = ""
 
     def encode(self) -> str:
         payload_data: dict[str, object] = {"h": self.host, "p": self.port, "t": self.token}
         prefix = "BRW2-"
-        if self.transport != "lan":
+        if self.transport == "ssh":
+            payload_data.update({"n": "ssh", "sh": self.ssh_host, "sp": self.ssh_port, "su": self.ssh_user})
+            prefix = "BRW4-"
+        elif self.transport != "lan":
             payload_data["n"] = self.transport
             prefix = "BRW3-"
         payload = json.dumps(payload_data, separators=(",", ":")).encode("utf-8")
@@ -105,7 +112,7 @@ class PairingCode:
     @classmethod
     def decode(cls, value: str) -> "PairingCode":
         value = value.strip()
-        if not value.startswith(("BRW2-", "BRW3-")):
+        if not value.startswith(("BRW2-", "BRW3-", "BRW4-")):
             raise ValueError("Invalid Blender Render Watchdog connection code")
         encoded = value[5:]
         encoded += "=" * (-len(encoded) % 4)
@@ -115,11 +122,16 @@ class PairingCode:
             port = int(data["p"])
             token = str(data["t"])
             transport = str(data.get("n") or "lan").strip().lower()
+            ssh_host = str(data.get("sh") or "").strip()
+            ssh_port = int(data.get("sp") or 22)
+            ssh_user = str(data.get("su") or "").strip()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid Blender Render Watchdog connection code") from error
-        if not host or not token or not 1 <= port <= 65535 or transport not in {"lan", "tailscale"}:
+        if not host or not token or not 1 <= port <= 65535 or transport not in {"lan", "tailscale", "ssh"}:
             raise ValueError("Invalid Blender Render Watchdog connection code")
-        return cls(host, port, token, transport)
+        if transport == "ssh" and (not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535):
+            raise ValueError("Invalid Blender Render Watchdog SSH connection code")
+        return cls(host, port, token, transport, ssh_host, ssh_port, ssh_user)
 
 
 @dataclass(slots=True)
@@ -348,6 +360,12 @@ class RenderCoordinator:
         advertised_host: str | None = None,
         transport: str = "lan",
         token: str | None = None,
+        ssh_host: str = "",
+        ssh_port: int = 22,
+        ssh_user: str = "",
+        require_pairing_code: bool = True,
+        trusted_tokens: set[str] | None = None,
+        on_trusted_token: Callable[[str, str], None] | None = None,
         controller_name: str | None = None,
         controller_hardware: str = "",
         on_event: Callable[[str], None] | None = None,
@@ -356,8 +374,17 @@ class RenderCoordinator:
         self.bind_host = bind_host
         self.port = port
         self.advertised_host = advertised_host or lan_address()
-        self.transport = "tailscale" if transport == "tailscale" else "lan"
+        self.transport = transport if transport in {"lan", "tailscale", "ssh"} else "lan"
         self.token = token or secrets.token_urlsafe(18)
+        self.ssh_host = ssh_host
+        self.ssh_port = ssh_port
+        self.ssh_user = ssh_user
+        self.require_pairing_code = bool(require_pairing_code)
+        self.trusted_tokens = set(trusted_tokens or set())
+        self.on_trusted_token = on_trusted_token
+        self.pairing_pin = self._new_pairing_pin()
+        self.pairing_pin_expires_at = time.time() + 600
+        self._pair_attempts: dict[str, list[float]] = {}
         self.controller_name = controller_name or socket.gethostname()
         self.controller_hardware = controller_hardware
         self.on_event = on_event
@@ -373,7 +400,48 @@ class RenderCoordinator:
     def pairing_code(self) -> str:
         if not self.port:
             raise RuntimeError("Coordinator has not started")
-        return PairingCode(self.advertised_host, self.port, self.token, self.transport).encode()
+        return PairingCode(
+            self.advertised_host,
+            self.port,
+            self.token,
+            self.transport,
+            self.ssh_host,
+            self.ssh_port,
+            self.ssh_user,
+        ).encode()
+
+    @staticmethod
+    def _new_pairing_pin() -> str:
+        return f"{secrets.randbelow(1_000_000):06d}"
+
+    def rotate_pairing_pin(self) -> str:
+        self.pairing_pin = self._new_pairing_pin()
+        self.pairing_pin_expires_at = time.time() + 600
+        return self.pairing_pin
+
+    def pair_device(self, device_name: str, pin: str, remote_address: str) -> tuple[dict[str, object], int]:
+        now = time.time()
+        recent = [stamp for stamp in self._pair_attempts.get(remote_address, []) if now - stamp < 60]
+        if len(recent) >= 5:
+            return {"ok": False, "error": "Too many pairing attempts. Wait one minute."}, 429
+        if len(self.trusted_tokens) >= 128:
+            return {"ok": False, "error": "Trusted device limit reached."}, 409
+        if self.require_pairing_code:
+            valid = now <= self.pairing_pin_expires_at and hmac.compare_digest(pin.strip(), self.pairing_pin)
+            if not valid:
+                recent.append(now)
+                self._pair_attempts[remote_address] = recent
+                return {"ok": False, "error": "The one-time code is invalid or expired."}, 403
+        token = secrets.token_urlsafe(32)
+        self.trusted_tokens.add(token)
+        name = device_name.strip()[:80] or "Worker"
+        if self.on_trusted_token:
+            self.on_trusted_token(token, name)
+        if self.require_pairing_code:
+            self.rotate_pairing_pin()
+        connection = PairingCode(self.advertised_host, self.port, token, "lan").encode()
+        self.event(f"[NETWORK] Trusted device paired: {name}")
+        return {"ok": True, "connection_code": connection, "controller": self.controller_name}, 200
 
     def event(self, message: str) -> None:
         if self.on_event:
@@ -390,10 +458,13 @@ class RenderCoordinator:
 
             def _authorized(self) -> bool:
                 query_token = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("token", [""])[0]
-                return self.headers.get("X-Watchdog-Token", "") == coordinator.token or query_token == coordinator.token
+                supplied = self.headers.get("X-Watchdog-Token", "") or query_token
+                return bool(supplied) and (hmac.compare_digest(supplied, coordinator.token) or supplied in coordinator.trusted_tokens)
 
-            def _json_body(self) -> dict[str, object]:
-                length = min(int(self.headers.get("Content-Length", "0") or 0), 1_500_000_000)
+            def _json_body(self, maximum: int = 1_500_000_000) -> dict[str, object]:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                if length < 0 or length > maximum:
+                    raise ValueError("Request body is too large")
                 raw = self.rfile.read(length) if length else b"{}"
                 data = json.loads(raw.decode("utf-8"))
                 return data if isinstance(data, dict) else {}
@@ -438,13 +509,19 @@ class RenderCoordinator:
                 self._reject(404, "Not found")
 
             def do_POST(self) -> None:  # noqa: N802
-                if not self._authorized():
-                    self._reject()
-                    return
                 route = urllib.parse.urlparse(self.path).path
                 try:
-                    data = self._json_body()
-                    if route == "/api/join":
+                    data = self._json_body(32_768 if route == "/api/pair" else 1_500_000_000)
+                    if route == "/api/pair":
+                        result, status = coordinator.pair_device(
+                            str(data.get("name") or "Worker"),
+                            str(data.get("pin") or ""),
+                            self.client_address[0],
+                        )
+                        self._send_json(result, status)
+                    elif not self._authorized():
+                        self._reject()
+                    elif route == "/api/join":
                         result, status = coordinator.join(
                             str(data.get("name") or "Worker"),
                             str(data.get("hardware") or ""),
@@ -717,6 +794,28 @@ def _request_json(url: str, token: str, data: dict[str, object] | None = None, t
     with urllib.request.urlopen(request, timeout=timeout) as response:
         result = json.loads(response.read().decode("utf-8"))
     return result if isinstance(result, dict) else {}
+
+
+def request_pairing(host: str, port: int, device_name: str, pin: str = "", timeout: float = 8.0) -> str:
+    """Exchange a short one-time PIN for a device-specific reusable token."""
+    if not host or not 1 <= int(port) <= 65535:
+        raise ValueError("Invalid controller address")
+    try:
+        result = _request_json(
+            f"http://{host}:{int(port)}/api/pair",
+            "",
+            {"name": device_name, "pin": pin.strip()},
+            timeout=timeout,
+        )
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read().decode("utf-8")).get("error")
+        except (OSError, ValueError, json.JSONDecodeError):
+            detail = ""
+        raise ConnectionError(str(detail or f"Pairing failed ({error.code})")) from error
+    code = str(result.get("connection_code") or "")
+    PairingCode.decode(code)
+    return code
 
 
 class NetworkWorker:
