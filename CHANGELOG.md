@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Unified workspace and project queue
+
+- Combined projects, active render state and device groups into one lightweight Workspace.
+- Added a single persisted active project shared by the queue, network plan and mobile state.
+- Added queue format v2 migration, source revision fingerprints and duplicate-project updates.
+- Added fixed or adaptive contiguous frame chunks with a default target of 10 frames.
+
+### Persistent render groups
+
+- Added saved render groups with open or one-time-code LAN access and `brw://join/...` invitations.
+- Added stable installation identities and hardware capability records so reconnects and IP changes do not duplicate devices.
+- Added group discovery metadata without exposing access tokens and cached offline members for a stable device list.
+- Added manual coordinator takeover for a saved group when its previous main PC is unavailable.
+
+### Render devices and performance
+
+- Added per-project and per-device CPU, GPU, CPU + GPU and automatic modes.
+- Added explicit OptiX, CUDA, HIP, oneAPI and Metal selection with capability validation.
+- Render workers now process a contiguous frame batch in one hidden Blender launch.
+- Network ETA now uses the measured throughput of online workers.
+- Added a code-native connection icon and disabled heavyweight effects on the unified navigation path.
+- Expanded the automated suite to 99 tests covering project state, groups, stable reconnects, chunks, backends and LAN metadata.
+
 ## 2.6.0 — 2026-08-22
 
 ### Local network pairing
