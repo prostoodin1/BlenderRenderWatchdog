@@ -1,6 +1,7 @@
+import tkinter as tk
 import unittest
 
-from glass_ui import blend_hex, clamp, rounded_points
+from glass_ui import GlassCombo, blend_hex, clamp, rounded_points
 
 
 class GlassUiMathTests(unittest.TestCase):
@@ -19,6 +20,19 @@ class GlassUiMathTests(unittest.TestCase):
         self.assertEqual(len(points), 24)
         self.assertEqual(points[0:2], [5.0, 0])
         self.assertEqual(points[4:6], [20, 0])
+
+    def test_glass_combo_can_refresh_values_after_creation(self) -> None:
+        try:
+            root = tk.Tk()
+        except tk.TclError as error:
+            self.skipTest(f"Tk display is unavailable: {error}")
+        root.withdraw()
+        try:
+            combo = GlassCombo(root, values=("First",))
+            combo.configure(values=("Second", "Third"))
+            self.assertEqual(tuple(combo.entry.cget("values")), ("Second", "Third"))
+        finally:
+            root.destroy()
 
 
 if __name__ == "__main__":

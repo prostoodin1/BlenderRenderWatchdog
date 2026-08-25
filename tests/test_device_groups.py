@@ -56,6 +56,14 @@ class DeviceGroupTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             group.register_device("worker-device", "Impostor", identity_fingerprint="second")
 
+    def test_cached_offline_device_does_not_look_fresh_after_refresh(self) -> None:
+        group = RenderGroup("Farm", "main-device")
+
+        member = group.register_device("worker-device", "Worker", seen_at=10.0)
+        group.register_device("worker-device", "Worker", seen_at=10.0)
+
+        self.assertEqual(member.last_seen, 10.0)
+
     def test_offline_coordinator_fails_over_to_oldest_trusted_member(self) -> None:
         group = RenderGroup("Farm", "main", coordinator_device_id="main", allow_failover=True)
         main = group.register_device("main", "Main", role="coordinator")

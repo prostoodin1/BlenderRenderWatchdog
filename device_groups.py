@@ -158,7 +158,8 @@ class DeviceRecord:
             self.addresses = _clean_strings([address, *self.addresses], limit=8)
         if role in DEVICE_ROLES:
             self.role = role
-        self.last_seen = max(self.last_seen, float(seen_at or time.time()))
+        observed_at = time.time() if seen_at is None else float(seen_at)
+        self.last_seen = max(self.last_seen, observed_at)
 
     def is_online(self, now: float | None = None, timeout: float = 30.0) -> bool:
         return float(now or time.time()) - self.last_seen < timeout
@@ -221,6 +222,7 @@ class RenderGroup:
         address: str = "",
         role: str = "worker",
         trusted: bool = True,
+        seen_at: float | None = None,
     ) -> DeviceRecord:
         """Insert or refresh one stable member without creating duplicates."""
         member = self.members.get(device_id)
@@ -235,6 +237,8 @@ class RenderGroup:
                 trusted=trusted,
             )
             self.members[device_id] = member
+            if seen_at is not None:
+                member.last_seen = float(seen_at)
         else:
             member.update(
                 name=name,
@@ -242,6 +246,7 @@ class RenderGroup:
                 capabilities=capabilities,
                 address=address,
                 role=role,
+                seen_at=seen_at,
             )
             member.trusted = member.trusted or trusted
         self.updated_at = time.time()

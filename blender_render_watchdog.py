@@ -5214,6 +5214,7 @@ def run_gui(args: argparse.Namespace) -> int:
                                 capabilities=DeviceCapabilities.from_dict(raw_capabilities),
                                 address=str((snapshot.get("controller") or {}).get("host") or "") if isinstance(snapshot.get("controller"), dict) else "",
                                 role="coordinator" if device.get("is_controller") else "worker",
+                                seen_at=float(device.get("last_seen") or time.time()) if device.get("online", True) else float(device.get("last_seen") or 0.0),
                             )
                         self.network_tree.insert(
                             "",

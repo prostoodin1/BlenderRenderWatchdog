@@ -530,6 +530,21 @@ class GlassCombo(GlassEntry):
         tk.Canvas.bind(self, "<Configure>", self._resize)
         self.after_idle(self._draw)
 
+    def configure(self, cnf=None, **kwargs):
+        options = dict(cnf or {}) if isinstance(cnf, dict) else {}
+        options.update(kwargs)
+        combo_options = {
+            key: options.pop(key)
+            for key in tuple(options)
+            if key in {"state", "textvariable", "values", "width"}
+        }
+        if combo_options:
+            self.entry.configure(**combo_options)
+        if options:
+            tk.Canvas.configure(self, **options)
+
+    config = configure
+
 
 class GlassProgress(tk.Canvas):
     def __init__(self, parent, *, variable: tk.DoubleVar, maximum: float = 100.0, palette=None, backdrop=None, **kwargs) -> None:
