@@ -39,7 +39,7 @@ from glass_ui import ConnectionStatusIcon, GlassCard, GlassTabView, GlassWidgetF
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from lan_discovery import DiscoveredController, LanDiscoveryAdvertiser, discover_controllers
 from mobile_dashboard import MobileDashboardServer
-from network_render import MAX_WORKERS, WORKER_OFFLINE_SECONDS, NetworkWorker, PairingCode, RenderCoordinator, request_pairing
+from network_render import MAX_WORKERS, WORKER_OFFLINE_SECONDS, NetworkWorker, PairingCode, RenderCoordinator, lan_address, request_pairing
 from process_utils import hidden_subprocess_kwargs
 from render_analytics import RenderHistory, RenderSession, estimate_render
 from render_queue import RenderJob, RenderQueue
@@ -170,7 +170,11 @@ def load_saved_network_connections(value: str) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(controller_id): str(code) for controller_id, code in data.items() if str(code).startswith("BRW")}
+    return {
+        str(controller_id): str(code)
+        for controller_id, code in data.items()
+        if str(code).startswith("BRW") or str(code).casefold().startswith("brw://join/")
+    }
 
 
 def send_notification(title: str, message: str) -> None:
@@ -1594,6 +1598,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.discovered_controller_labels: dict[str, DiscoveredController] = {}
             self.trusted_network_devices = load_trusted_network_devices(self.config.get("network_trusted_devices", ""))
             self.saved_lan_connections = load_saved_network_connections(self.config.get("network_saved_connections", ""))
+            for saved_group_id, saved_code in self.saved_lan_connections.items():
+                saved_group = self.group_registry.groups.get(saved_group_id)
+                if saved_group is not None and not saved_group.connection_code:
+                    saved_group.remember_connection(saved_code)
+            self.available_group_entries: dict[str, dict[str, object]] = {}
             self.ssh_host_var = tk.StringVar(value=self.config.get("ssh_host", ""))
             self.ssh_port_var = tk.StringVar(value=self.config.get("ssh_port", "22"))
             self.ssh_user_var = tk.StringVar(value=self.config.get("ssh_user") or os.environ.get("USERNAME", ""))
@@ -2517,7 +2526,6 @@ def run_gui(args: argparse.Namespace) -> int:
             ui.Label(group_head, text="Render group", style="CardTitle.TLabel").grid(row=0, column=1, sticky="w")
             ui.Button(group_head, text="New group", command=self.create_new_render_group).grid(row=0, column=2, sticky="e", padx=(0, 6))
             ui.Button(group_head, text="Connection", command=self.open_connection_settings).grid(row=0, column=3, sticky="e")
-            role_row = ui.Frame(group_card, style="Surface.TFrame")
             self.network_group_selector = ui.Combobox(
                 group_card,
                 textvariable=self.network_group_selector_var,
@@ -2526,16 +2534,22 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_group_selector.grid(row=1, column=0, sticky="ew", pady=(10, 0))
             self.network_group_selector.bind("<<ComboboxSelected>>", self.switch_saved_render_group)
             self.refresh_saved_group_selector()
-            role_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-            role_row.columnconfigure(0, weight=1)
-            role_row.columnconfigure(1, weight=1)
-            ui.Button(role_row, text="Main PC", command=lambda: self.set_network_role("host")).grid(row=0, column=0, sticky="ew", padx=(0, 4))
-            ui.Button(role_row, text="Join group", command=lambda: self.set_network_role("connect")).grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
-            host_controls = ui.Frame(group_card, style="Surface.TFrame")
-            host_controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            role_palette = {**self.colors, "bg": self.colors["panel"]}
+            self.network_role_tabs = GlassTabView(
+                group_card,
+                palette=role_palette,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+                lightweight=True,
+            )
+            self.network_role_tabs.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+            self.network_role_tabs.page_host.configure(height=390)
+
+            host_controls = ui.Frame(self.network_role_tabs.page_host, style="Surface.TFrame")
             host_controls.columnconfigure(0, weight=1)
             self.network_controller_card = host_controls
+            self.network_role_tabs.add(host_controls, text="Main PC")
             ui.Entry(host_controls, textvariable=self.network_group_name_var).grid(row=0, column=0, sticky="ew")
             self.network_group_security_combo = ui.Combobox(
                 host_controls,
@@ -2566,21 +2580,48 @@ def run_gui(args: argparse.Namespace) -> int:
             render_actions.columnconfigure(0, weight=1)
             ui.Button(render_actions, text="Render on group", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew")
             ui.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, padx=(7, 0))
+            ssh_actions = ui.Frame(host_controls, style="Surface.TFrame")
+            ssh_actions.grid(row=7, column=0, sticky="ew", pady=(9, 0))
+            ssh_actions.columnconfigure(1, weight=1)
+            ui.Button(ssh_actions, text="Generate SSH key", command=self.create_ssh_invitation).grid(row=0, column=0, sticky="w")
+            ui.Entry(ssh_actions, textvariable=self.ssh_share_invite_var, state="readonly").grid(row=0, column=1, sticky="ew", padx=(7, 0))
+            ui.Button(ssh_actions, text="Copy invite", command=self.copy_network_code).grid(row=0, column=2, padx=(7, 0))
 
-            join_controls = ui.Frame(group_card, style="Surface.TFrame")
-            join_controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            join_controls = ui.Frame(self.network_role_tabs.page_host, style="Surface.TFrame")
             join_controls.columnconfigure(0, weight=1)
             self.network_worker_card = join_controls
-            self.lan_controller_combo = ui.Combobox(join_controls, textvariable=self.lan_controller_var, state="readonly")
-            self.lan_controller_combo.grid(row=0, column=0, sticky="ew")
-            ui.Button(join_controls, text="Refresh", command=self.refresh_lan_controllers).grid(row=0, column=1, padx=(7, 0))
-            ui.Entry(join_controls, textvariable=self.network_pairing_input_var).grid(row=1, column=0, sticky="ew", pady=(7, 0))
-            ui.Label(join_controls, text="Code only for protected groups", style="CardHint.TLabel").grid(row=2, column=0, sticky="w", pady=(3, 0))
+            self.network_role_tabs.add(join_controls, text="Worker")
+            available_head = ui.Frame(join_controls, style="Surface.TFrame")
+            available_head.grid(row=0, column=0, columnspan=2, sticky="ew")
+            available_head.columnconfigure(0, weight=1)
+            ui.Label(available_head, text="Available groups", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Button(available_head, text="Refresh", command=self.refresh_lan_controllers).grid(row=0, column=1, sticky="e")
+            self.available_groups_tree = ui.Treeview(
+                join_controls,
+                columns=("group", "devices", "route", "status"),
+                displaycolumns=("group", "route", "status"),
+                show="headings",
+                selectmode="browse",
+                style="Queue.Treeview",
+                height=5,
+            )
+            for column_name, heading, width in (
+                ("group", "Group", 155),
+                ("route", "Connection", 75),
+                ("status", "Status", 80),
+            ):
+                self.register_heading(self.available_groups_tree, column_name, heading)
+                self.available_groups_tree.column(column_name, width=width, minwidth=60, stretch=column_name == "group")
+            self.available_groups_tree.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
+            self.available_groups_tree.bind("<Double-1>", lambda _event: self.connect_selected_available_group())
+            ui.Entry(join_controls, textvariable=self.network_pairing_input_var).grid(row=2, column=0, sticky="ew", pady=(7, 0))
+            ui.Label(join_controls, text="Code only for protected groups", style="CardHint.TLabel").grid(row=3, column=0, sticky="w", pady=(3, 0))
             join_actions = ui.Frame(join_controls, style="Surface.TFrame")
-            join_actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            join_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             join_actions.columnconfigure(0, weight=1)
-            ui.Button(join_actions, text="Connect", style="Primary.TButton", command=self.connect_selected_lan_controller).grid(row=0, column=0, sticky="ew")
+            ui.Button(join_actions, text="Connect", style="Primary.TButton", command=self.connect_selected_available_group).grid(row=0, column=0, sticky="ew")
             ui.Button(join_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=1, padx=(7, 0))
+            self.network_role_tabs.bind("<<NotebookTabChanged>>", self.on_network_role_tab_changed)
 
             devices = self.make_card(column, ui, row=1, column=0, sticky="nsew", pady=(12, 0))
             devices.columnconfigure(0, weight=1)
@@ -2679,6 +2720,98 @@ def run_gui(args: argparse.Namespace) -> int:
             active = self.group_registry.active
             selected = next((label for label, group in labels.items() if active and group.group_id == active.group_id), "")
             self.network_group_selector_var.set(selected)
+            if hasattr(self, "available_groups_tree"):
+                self.refresh_available_group_tree()
+
+        def refresh_available_group_tree(self) -> None:
+            tree = getattr(self, "available_groups_tree", None)
+            if tree is None:
+                return
+            previous = tree.selection()
+            previous_id = previous[0] if previous else ""
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+            entries: dict[str, dict[str, object]] = {}
+            local_device_id = self.group_registry.identity.device_id
+            for controller in self.discovered_controllers.values():
+                group_id = controller.effective_group_id
+                remembered_group = self.group_registry.groups.get(group_id)
+                if remembered_group is not None and remembered_group.owner_device_id == local_device_id:
+                    continue
+                remembered_code = (
+                    remembered_group.connection_code if remembered_group is not None else self.saved_lan_connections.get(group_id, "")
+                )
+                status = self.tr("Ready")
+                if not controller.coordinator_online or not controller.joinable:
+                    status = self.tr("Offline")
+                elif controller.requires_code and not remembered_code:
+                    status = self.tr("Code required")
+                entries[group_id] = {
+                    "controller": controller,
+                    "group": remembered_group,
+                    "connection_code": remembered_code,
+                    "route": "LAN",
+                    "status": status,
+                    "device_count": controller.device_count,
+                    "name": controller.effective_group_name,
+                }
+            for group_id, group in self.group_registry.groups.items():
+                if group_id in entries or group.owner_device_id == local_device_id or not group.connection_code:
+                    continue
+                route = "LAN"
+                try:
+                    connection = PairingCode.decode(group.connection_code)
+                    route = "SSH" if connection.transport == "ssh" else "LAN"
+                except ValueError:
+                    pass
+                entries[group_id] = {
+                    "controller": None,
+                    "group": group,
+                    "connection_code": group.connection_code,
+                    "route": route,
+                    "status": self.tr("Remembered") if route == "SSH" else self.tr("Offline"),
+                    "device_count": len(group.members),
+                    "name": group.name,
+                }
+            self.available_group_entries = entries
+            for group_id, entry in entries.items():
+                tree.insert(
+                    "",
+                    "end",
+                    iid=group_id,
+                    values=(entry["name"], entry["device_count"], entry["route"], entry["status"]),
+                )
+            selected_id = previous_id if previous_id in entries else next(iter(entries), "")
+            if selected_id:
+                tree.selection_set(selected_id)
+                tree.focus(selected_id)
+
+        def connect_selected_available_group(self) -> None:
+            tree = getattr(self, "available_groups_tree", None)
+            selection = tree.selection() if tree is not None else ()
+            group_id = selection[0] if selection else next(iter(self.available_group_entries), "")
+            entry = self.available_group_entries.get(group_id)
+            if entry is None:
+                messagebox.showinfo(self.tr("Available groups"), self.tr("No available or remembered groups were found."))
+                return
+            controller = entry.get("controller")
+            if isinstance(controller, DiscoveredController):
+                self.connect_selected_lan_controller(controller)
+                return
+            group = entry.get("group")
+            connection_code = str(entry.get("connection_code") or "")
+            if not isinstance(group, RenderGroup) or not connection_code:
+                messagebox.showinfo(self.tr("Available groups"), self.tr("This group is currently offline."))
+                return
+            self.group_registry.active_group_id = group.group_id
+            self.network_controller_id = group.group_id
+            self.network_group_name_var.set(group.name)
+            self.network_join_code_var.set(connection_code)
+            if group.ssh_identity_file:
+                self.ssh_identity_var.set(group.ssh_identity_file)
+            self.refresh_saved_group_selector()
+            self.save_current_config()
+            self.start_network_worker()
 
         def switch_saved_render_group(self, _event=None) -> None:
             group = self.saved_group_labels.get(self.network_group_selector_var.get())
@@ -2694,6 +2827,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_group_security_var.set(group.security_mode)
             self.network_allow_failover_var.set(group.allow_failover)
             self.network_advertise_lan_var.set(group.visible_on_lan)
+            if group.connection_code:
+                self.network_join_code_var.set(group.connection_code)
+            if group.ssh_identity_file:
+                self.ssh_identity_var.set(group.ssh_identity_file)
             self.update_group_security_label()
             self.group_registry.save(GROUPS_PATH)
             self.save_current_config()
@@ -3732,10 +3869,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.compose_video_var.set(job.compose_video)
             self.video_format_var.set(job.video_format)
             self.video_fps_var.set(str(job.fps))
-            self.chunk_mode_var.set(job.chunk_mode)
-            self.chunk_size_var.set(str(job.chunk_size))
-            self.render_device_mode_var.set(job.render_device_mode)
-            self.compute_backend_var.set(job.compute_backend)
+            # Hardware and distribution controls describe this computer, not a
+            # particular .blend file.  Older queue files still contain these
+            # fields for compatibility, but selecting a project must never
+            # overwrite the computer-wide profile saved in config.ini.
             self.set_raw(self.active_project_var, job.project_name)
             self.update_manual_controls()
             self.update_video_controls()
@@ -4411,6 +4548,12 @@ def run_gui(args: argparse.Namespace) -> int:
         def _ssh_share_connection(self, private_key: str = "") -> PairingCode:
             ssh_host = self.ssh_host_var.get().strip()
             ssh_user = self.ssh_user_var.get().strip()
+            if not ssh_host:
+                ssh_host = self.network_controller.advertised_host if self.network_controller is not None else lan_address()
+                self.ssh_host_var.set(ssh_host)
+            if not ssh_user:
+                ssh_user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+                self.ssh_user_var.set(ssh_user)
             ssh_port = int(self.ssh_port_var.get().strip() or "22")
             if not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535:
                 raise ValueError(self.tr("Enter a valid SSH address, port, and user."))
@@ -4420,16 +4563,21 @@ def run_gui(args: argparse.Namespace) -> int:
             else:
                 access = resolve_service_access(self.access_mode, self.access_key_var.get(), "network")
                 controller_port = access.port
-                controller_token = access.token
+                active_group = self.group_registry.active
+                controller_token = active_group.access_token if active_group is not None else access.token
+            active_group = self.group_registry.active
             return PairingCode(
-                "127.0.0.1",
-                controller_port,
-                controller_token,
-                "ssh",
-                ssh_host,
-                ssh_port,
-                ssh_user,
-                private_key,
+                host="127.0.0.1",
+                port=controller_port,
+                token=controller_token,
+                transport="ssh",
+                ssh_host=ssh_host,
+                ssh_port=ssh_port,
+                ssh_user=ssh_user,
+                ssh_private_key=private_key,
+                group_id=active_group.group_id if active_group is not None else self.network_controller_id,
+                group_name=active_group.name if active_group is not None else self.network_group_name_var.get().strip(),
+                coordinator_device_id=self.group_registry.identity.device_id,
             )
 
         def _share_link_for_controller(self, fallback: str) -> str:
@@ -4604,9 +4752,10 @@ def run_gui(args: argparse.Namespace) -> int:
             current = self.lan_controller_var.get()
             if current not in labels:
                 self.lan_controller_var.set(next(iter(labels), ""))
+            self.refresh_available_group_tree()
 
-        def connect_selected_lan_controller(self) -> None:
-            controller = self.discovered_controller_labels.get(self.lan_controller_var.get())
+        def connect_selected_lan_controller(self, selected_controller: DiscoveredController | None = None) -> None:
+            controller = selected_controller or self.discovered_controller_labels.get(self.lan_controller_var.get())
             if controller is None:
                 messagebox.showinfo(self.tr("Local network"), self.tr("No main PC was found. Refresh the list or use an advanced connection code."))
                 return
@@ -4641,19 +4790,31 @@ def run_gui(args: argparse.Namespace) -> int:
         def _finish_lan_pairing(self, controller: DiscoveredController, code: str) -> None:
             group_id = controller.effective_group_id
             self.saved_lan_connections[group_id] = code
+            try:
+                connection = PairingCode.decode(code)
+            except ValueError:
+                connection = None
             remembered = self.group_registry.groups.get(group_id)
             if remembered is None:
                 remembered = RenderGroup(
                     name=controller.effective_group_name,
-                    owner_device_id=controller.coordinator_device_id or group_id,
+                    owner_device_id=(connection.coordinator_device_id if connection else "") or controller.coordinator_device_id or group_id,
                     group_id=group_id,
                     security_mode=controller.security_mode,
-                    coordinator_device_id=controller.coordinator_device_id,
+                    coordinator_device_id=(connection.coordinator_device_id if connection else "") or controller.coordinator_device_id,
                 )
             else:
                 remembered.name = controller.effective_group_name
                 remembered.security_mode = controller.security_mode or remembered.security_mode
                 remembered.coordinator_device_id = controller.coordinator_device_id or remembered.coordinator_device_id
+            remembered.remember_connection(code)
+            if remembered.coordinator_device_id:
+                remembered.register_device(
+                    remembered.coordinator_device_id,
+                    controller.name,
+                    address=controller.host,
+                    role="coordinator",
+                )
             remembered.register_device(
                 self.group_registry.identity.device_id,
                 self.worker_name_var.get().strip() or platform.node(),
@@ -4667,18 +4828,86 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_controller_id = group_id
             self.network_group_name_var.set(remembered.name)
             self.refresh_saved_group_selector()
+            self.refresh_available_group_tree()
             self.network_join_code_var.set(code)
             self.network_pairing_input_var.set("")
             self.save_current_config()
             self.start_network_worker()
+
+        def remember_remote_group_connection(
+            self,
+            connection: PairingCode,
+            *,
+            identity_file: Path | None = None,
+        ) -> None:
+            if not connection.group_id:
+                return
+            group = self.group_registry.groups.get(connection.group_id)
+            if group is None:
+                group = RenderGroup(
+                    name=connection.group_name or "Render group",
+                    owner_device_id=connection.coordinator_device_id or connection.group_id,
+                    group_id=connection.group_id,
+                    coordinator_device_id=connection.coordinator_device_id,
+                )
+            else:
+                group.name = connection.group_name or group.name
+                group.coordinator_device_id = connection.coordinator_device_id or group.coordinator_device_id
+            stored_code = connection.without_private_key().invitation_link
+            group.remember_connection(
+                stored_code,
+                ssh_identity_file=str(identity_file) if identity_file is not None else group.ssh_identity_file,
+            )
+            if connection.transport == "ssh":
+                group.ssh_endpoint = f"{connection.ssh_user}@{connection.ssh_host}:{connection.ssh_port}"
+            if group.coordinator_device_id:
+                group.register_device(
+                    group.coordinator_device_id,
+                    connection.group_name or "Main PC",
+                    address=connection.ssh_host if connection.transport == "ssh" else connection.host,
+                    role="coordinator",
+                )
+            group.register_device(
+                self.group_registry.identity.device_id,
+                self.worker_name_var.get().strip() or platform.node(),
+                identity_fingerprint=self.group_registry.identity.fingerprint,
+                capabilities=self.local_capabilities,
+                role="worker",
+            )
+            self.group_registry.remember_group(group)
+            self.group_registry.active_group_id = group.group_id
+            self.network_controller_id = group.group_id
+            self.network_group_name_var.set(group.name)
+            self.saved_lan_connections[group.group_id] = stored_code
+            self.group_registry.save(GROUPS_PATH)
+            self.refresh_saved_group_selector()
+            self.save_current_config()
 
         def set_network_role(self, role: str) -> None:
             self.network_role_var.set("host" if role == "host" else "connect")
             self.update_network_role_view()
             self.save_current_config()
 
+        def on_network_role_tab_changed(self, _event=None) -> None:
+            tabs = getattr(self, "network_role_tabs", None)
+            if tabs is None:
+                return
+            self.network_role_var.set("host" if tabs.current_index == 0 else "connect")
+            if tabs.current_index == 1:
+                self.refresh_available_group_tree()
+                if time.monotonic() - self.last_lan_discovery_at >= 1:
+                    self.refresh_lan_controllers()
+            self.schedule_config_save()
+
         def update_network_role_view(self) -> None:
             if not hasattr(self, "network_controller_card") or not hasattr(self, "network_worker_card"):
+                return
+            tabs = getattr(self, "network_role_tabs", None)
+            if tabs is not None:
+                tabs.select(0 if self.network_role_var.get() == "host" else 1)
+                if self.network_role_var.get() == "connect":
+                    self.refresh_available_group_tree()
+                self.root.after_idle(self.refresh_tab_scroll_regions)
                 return
             if self.network_role_var.get() == "host":
                 self.network_worker_card.grid_remove()
@@ -4750,7 +4979,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     port=access.port,
                     advertised_host=advertised_host,
                     transport=self.network_transport,
-                    token=access.token,
+                    token=active_group.access_token if active_group is not None else access.token,
                     ssh_host=ssh_host,
                     ssh_port=ssh_port,
                     ssh_user=ssh_user,
@@ -4763,6 +4992,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     on_frame=self.on_network_frame,
                     group_id=self.network_controller_id,
                     controller_device_id=self.group_registry.identity.device_id,
+                    group_name=active_group.name if active_group is not None else self.network_group_name_var.get().strip(),
                 )
                 code = self.network_controller.start()
                 link = self._share_link_for_controller(self.network_controller.invitation_link)
@@ -4875,9 +5105,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.status_detail_var, "Sharing the selected project with workers")
             self.set_localized(self.network_status_var, "Preparing the original project…")
             controller = self.network_controller
+            chunk_mode = self.chunk_mode_var.get().strip()
+            chunk_size = self.parse_positive_int(self.chunk_size_var.get(), 10, 1, 1000)
             threading.Thread(
                 target=self.prepare_network_plan_worker,
-                args=(controller, blend, output, start, end, settings, completed_frames, active_job),
+                args=(controller, blend, output, start, end, settings, completed_frames, active_job, chunk_mode, chunk_size),
                 daemon=True,
             ).start()
 
@@ -4891,6 +5123,8 @@ def run_gui(args: argparse.Namespace) -> int:
             settings: dict[str, object],
             completed_frames: set[int],
             active_job: RenderJob,
+            chunk_mode: str,
+            chunk_size: int,
         ) -> None:
             try:
                 legacy_cache = app_config_dir() / "network_projects"
@@ -4905,8 +5139,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     start,
                     end,
                     completed_frames,
-                    chunk_mode=active_job.chunk_mode,
-                    chunk_size=active_job.chunk_size,
+                    chunk_mode=chunk_mode,
+                    chunk_size=chunk_size,
                     project_id=active_job.project_id,
                     source_fingerprint=active_job.source_fingerprint,
                 )
@@ -4942,6 +5176,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 return
             worker_name = name_override or self.worker_name_var.get().strip() or platform.node()
             if connection.transport != "ssh":
+                if connection.coordinator_device_id != self.group_registry.identity.device_id:
+                    self.remember_remote_group_connection(connection)
                 self._finish_network_worker_connection(code, blender, worker_name)
                 return
             state = query_openssh_state()
@@ -4963,6 +5199,7 @@ def run_gui(args: argparse.Namespace) -> int:
             if identity is not None and not identity.is_file():
                 messagebox.showerror(self.tr("Worker connection"), self.tr("SSH private key was not found."))
                 return
+            self.remember_remote_group_connection(connection, identity_file=identity)
             attempt = uuid.uuid4().hex
             self.network_connect_attempt = attempt
             self.set_localized(self.openssh_status_var, "Connecting SSH tunnel…")
@@ -4971,8 +5208,27 @@ def run_gui(args: argparse.Namespace) -> int:
                 tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port, identity)
                 try:
                     local_port = tunnel.start()
-                    worker_code = PairingCode("127.0.0.1", local_port, connection.token, "lan").encode()
-                    self.root.after(0, lambda: self._finish_ssh_worker_connection(attempt, tunnel, worker_code, blender, worker_name))
+                    worker_code = PairingCode(
+                        host="127.0.0.1",
+                        port=local_port,
+                        token=connection.token,
+                        transport="lan",
+                        group_id=connection.group_id,
+                        group_name=connection.group_name,
+                        coordinator_device_id=connection.coordinator_device_id,
+                    ).encode()
+                    self.root.after(
+                        0,
+                        lambda: self._finish_ssh_worker_connection(
+                            attempt,
+                            tunnel,
+                            worker_code,
+                            blender,
+                            worker_name,
+                            connection.without_private_key(),
+                            identity,
+                        ),
+                    )
                 except Exception as error:
                     tunnel.stop()
                     try:
@@ -4982,14 +5238,28 @@ def run_gui(args: argparse.Namespace) -> int:
 
             threading.Thread(target=connect_ssh, name="ssh-tunnel-connect", daemon=True).start()
 
-        def _finish_ssh_worker_connection(self, attempt: str, tunnel: SshTunnel, code: str, blender: Path, worker_name: str) -> None:
+        def _finish_ssh_worker_connection(
+            self,
+            attempt: str,
+            tunnel: SshTunnel,
+            code: str,
+            blender: Path,
+            worker_name: str,
+            remote_connection: PairingCode,
+            identity: Path | None,
+        ) -> None:
             if self.network_connect_attempt != attempt:
                 tunnel.stop()
                 return
             self.network_connect_attempt = ""
             self.ssh_tunnel = tunnel
             self.set_localized(self.openssh_status_var, "SSH tunnel connected")
-            self._finish_network_worker_connection(code, blender, worker_name)
+            self._finish_network_worker_connection(
+                code,
+                blender,
+                worker_name,
+                reconnect_callback=lambda: self.restart_ssh_worker_route(remote_connection, identity),
+            )
 
         def _fail_ssh_worker_connection(self, attempt: str, message: str) -> None:
             if self.network_connect_attempt != attempt:
@@ -4997,7 +5267,30 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_connect_attempt = ""
             messagebox.showerror(self.tr("Worker connection"), message)
 
-        def _finish_network_worker_connection(self, code: str, blender: Path, worker_name: str) -> None:
+        def restart_ssh_worker_route(self, connection: PairingCode, identity: Path | None) -> str:
+            previous = self.ssh_tunnel
+            if previous is not None:
+                previous.stop()
+            tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port, identity)
+            local_port = tunnel.start()
+            self.ssh_tunnel = tunnel
+            return PairingCode(
+                host="127.0.0.1",
+                port=local_port,
+                token=connection.token,
+                transport="lan",
+                group_id=connection.group_id,
+                group_name=connection.group_name,
+                coordinator_device_id=connection.coordinator_device_id,
+            ).encode()
+
+        def _finish_network_worker_connection(
+            self,
+            code: str,
+            blender: Path,
+            worker_name: str,
+            reconnect_callback=None,
+        ) -> None:
             try:
                 self.network_worker = NetworkWorker(
                     code,
@@ -5012,6 +5305,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     identity_fingerprint=self.group_registry.identity.fingerprint,
                     capabilities=self.local_capabilities,
                     compute_backend=self.compute_backend_var.get(),
+                    reconnect_callback=reconnect_callback,
                 )
                 worker = self.network_worker
                 threading.Thread(target=self.run_network_worker, args=(worker,), daemon=True).start()
@@ -5368,6 +5662,15 @@ def run_gui(args: argparse.Namespace) -> int:
                                 role="coordinator" if device.get("is_controller") else "worker",
                                 seen_at=float(device.get("last_seen") or time.time()) if device.get("online", True) else float(device.get("last_seen") or 0.0),
                             )
+                        current_frames = device.get("current_frames") if isinstance(device.get("current_frames"), list) else []
+                        batch_total = int(device.get("batch_total") or 0)
+                        batch_completed = int(device.get("batch_completed") or 0)
+                        if batch_total:
+                            current_label = f"{batch_completed}/{batch_total}"
+                        elif len(current_frames) > 1:
+                            current_label = f"{current_frames[0]}–{current_frames[-1]}"
+                        else:
+                            current_label = device.get("current_frame") or "—"
                         self.network_tree.insert(
                             "",
                             "end",
@@ -5376,11 +5679,7 @@ def run_gui(args: argparse.Namespace) -> int:
                                 name,
                                 self.tr("Online") if device.get("online", True) else self.tr("Offline"),
                                 str(device.get("hardware") or "—"),
-                                (
-                                    f"{device['current_frames'][0]}–{device['current_frames'][-1]}"
-                                    if isinstance(device.get("current_frames"), list) and len(device["current_frames"]) > 1
-                                    else device.get("current_frame") or "—"
-                                ),
+                                current_label,
                                 int(device.get("completed_frames") or 0),
                                 format_duration(float(device.get("average_seconds") or 0.0)),
                                 device.get("samples") or self.tr("Scene"),
@@ -5961,15 +6260,10 @@ def run_gui(args: argparse.Namespace) -> int:
 
                     job_options = dict(optimize_options)
                     job_options["resolution_percent"] = job.resolution_percent
-                    job_options["compute_backend"] = job.compute_backend
-                    if job.render_device_mode == "CPU":
-                        job_use_cpu, job_use_gpu = True, False
-                    elif job.render_device_mode == "GPU":
-                        job_use_cpu, job_use_gpu = False, True
-                    elif job.render_device_mode == "CPU_GPU":
-                        job_use_cpu, job_use_gpu = True, True
-                    else:
-                        job_use_cpu, job_use_gpu = use_cpu, use_gpu
+                    # CPU/GPU and Cycles backend are a persistent profile of
+                    # this machine. Projects only contribute scene-specific
+                    # options such as resolution and frame range.
+                    job_use_cpu, job_use_gpu = use_cpu, use_gpu
                     session = RenderSession(
                         str(blend),
                         str(frames),

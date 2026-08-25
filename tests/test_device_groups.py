@@ -25,6 +25,21 @@ class DeviceGroupTests(unittest.TestCase):
         self.assertEqual(restored.identity.fingerprint, registry.identity.fingerprint)
         self.assertEqual(restored.active.name, "Studio")
 
+    def test_group_connection_route_and_access_token_survive_round_trip(self) -> None:
+        registry = GroupRegistry(DeviceIdentity("device-a-123456789", "secret-value-that-is-long-enough"))
+        group = registry.create_group("Remote studio", "open")
+        group.remember_connection("BRW4-saved-route", ssh_identity_file="C:/Keys/render_ed25519")
+        access_token = group.access_token
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "groups.json"
+            registry.save(path)
+            restored = GroupRegistry.load(path)
+
+        self.assertEqual(restored.active.access_token, access_token)
+        self.assertEqual(restored.active.connection_code, "BRW4-saved-route")
+        self.assertEqual(restored.active.ssh_identity_file, "C:/Keys/render_ed25519")
+
     def test_rejoining_device_updates_record_instead_of_duplicating_it(self) -> None:
         group = RenderGroup("Farm", "main-device")
         first = group.register_device(

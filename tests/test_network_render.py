@@ -29,6 +29,22 @@ class PairingCodeTests(unittest.TestCase):
         self.assertTrue(ssh.encode().startswith("BRW4-"))
         self.assertEqual(PairingCode.decode(ssh.encode()), ssh)
 
+    def test_connection_code_carries_persistent_group_identity(self) -> None:
+        connection = PairingCode(
+            "192.168.1.5",
+            48620,
+            "secret",
+            group_id="group-123",
+            group_name="Studio farm",
+            coordinator_device_id="main-device",
+        )
+
+        restored = PairingCode.decode(connection.invitation_link)
+
+        self.assertEqual(restored.group_id, "group-123")
+        self.assertEqual(restored.group_name, "Studio farm")
+        self.assertEqual(restored.coordinator_device_id, "main-device")
+
     def test_invitation_link_decodes_like_a_connection_code(self) -> None:
         connection = PairingCode("127.0.0.1", 48620, "secret")
         self.assertEqual(PairingCode.decode(f"brw://join/{connection.encode()}"), connection)
@@ -62,7 +78,12 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(batch.frames, list(range(1, 11)))
         self.assertEqual(worker.current_frames, list(range(1, 11)))
+        self.assertEqual((worker.batch_completed, worker.batch_total), (0, 10))
         self.assertEqual(plan.summary()["running"], 10)
+
+        plan.complete(worker, 1, True)
+
+        self.assertEqual((worker.batch_completed, worker.batch_total), (1, 10))
 
     def test_manual_worker_chunk_size_overrides_plan_default(self) -> None:
         plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 50, chunk_mode="adaptive", chunk_size=10)
@@ -399,6 +420,103 @@ class CoordinatorHttpTests(unittest.TestCase):
                 worker.stop()
                 coordinator.stop()
 
+    def test_worker_continues_with_new_chunk_after_finishing_n_of_n(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blend = root / "scene.blend"
+            blend.write_bytes(b"blend")
+            fake_blender = root / "blender.exe"
+            fake_blender.touch()
+            events: list[str] = []
+            coordinator = RenderCoordinator(bind_host="127.0.0.1", advertised_host="127.0.0.1")
+            coordinator.start()
+            coordinator.start_plan(blend, root / "renders", 1, 5, chunk_mode="fixed", chunk_size=2)
+
+            def render(frame, _project):
+                output = root / f"worker_{frame}.png"
+                output.write_bytes(VALID_PNG)
+                return True, output, ""
+
+            worker = NetworkWorker(
+                coordinator.pairing_code,
+                fake_blender,
+                cache_folder=root / "cache",
+                render_frame=render,
+                on_event=events.append,
+            )
+            try:
+                worker.run(poll_seconds=0.01)
+                assignments = [event for event in events if "Rendering frames" in event]
+                self.assertEqual(len(assignments), 3)
+                self.assertTrue(any("Batch 2/2" in event for event in events))
+                self.assertEqual(coordinator.plan.summary()["completed"], 5)
+            finally:
+                worker.stop()
+                coordinator.stop()
+
+    def test_worker_rejoins_after_the_main_pc_temporarily_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            blend = root / "scene.blend"
+            blend.write_bytes(b"blend")
+            fake_blender = root / "blender.exe"
+            fake_blender.touch()
+            token = "stable-group-token-that-survives-restart"
+            first = RenderCoordinator(
+                bind_host="127.0.0.1",
+                advertised_host="127.0.0.1",
+                token=token,
+                group_id="remembered-group",
+            )
+            first.start()
+            port = first.port
+
+            def render(frame, _project):
+                output = root / f"reconnected_{frame}.png"
+                output.write_bytes(VALID_PNG)
+                return True, output, ""
+
+            worker = NetworkWorker(
+                first.pairing_code,
+                fake_blender,
+                device_id="stable-worker-device",
+                cache_folder=root / "cache",
+                render_frame=render,
+            )
+            thread = threading.Thread(target=worker.run, kwargs={"poll_seconds": 0.02, "stay_connected": True})
+            thread.start()
+            deadline = time.monotonic() + 3
+            while not first.workers and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(first.workers)
+            first.stop()
+            deadline = time.monotonic() + 4
+            while not worker.connection_failed.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(worker.connection_failed.is_set())
+
+            second = RenderCoordinator(
+                bind_host="127.0.0.1",
+                port=port,
+                advertised_host="127.0.0.1",
+                token=token,
+                group_id="remembered-group",
+            )
+            second.start()
+            second.start_plan(blend, root / "renders", 1, 1)
+            try:
+                deadline = time.monotonic() + 8
+                output = root / "renders" / "frame_0001.png"
+                while not output.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(output.exists())
+                self.assertEqual(len(second.workers_by_device), 1)
+                self.assertIn("stable-worker-device", second.workers_by_device)
+            finally:
+                worker.stop()
+                thread.join(timeout=3)
+                second.stop()
+
     def test_worker_heartbeats_while_a_frame_is_rendering(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -412,10 +530,10 @@ class CoordinatorHttpTests(unittest.TestCase):
             heartbeat_count = 0
             original_heartbeat = coordinator.heartbeat
 
-            def counted_heartbeat(worker_id: str):
+            def counted_heartbeat(worker_id: str, **progress):
                 nonlocal heartbeat_count
                 heartbeat_count += 1
-                return original_heartbeat(worker_id)
+                return original_heartbeat(worker_id, **progress)
 
             coordinator.heartbeat = counted_heartbeat
 

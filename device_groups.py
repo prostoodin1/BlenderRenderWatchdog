@@ -195,6 +195,10 @@ class RenderGroup:
     allow_failover: bool = True
     coordinator_device_id: str = ""
     ssh_endpoint: str = ""
+    access_token: str = field(default_factory=lambda: secrets.token_urlsafe(32), repr=False)
+    connection_code: str = field(default="", repr=False)
+    ssh_identity_file: str = ""
+    last_connected_at: float = 0.0
     members: dict[str, DeviceRecord] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -206,6 +210,12 @@ class RenderGroup:
         self.security_mode = self.security_mode if self.security_mode in GROUP_SECURITY_MODES else "approval"
         self.coordinator_device_id = str(self.coordinator_device_id or self.owner_device_id).strip()
         self.ssh_endpoint = str(self.ssh_endpoint).strip()[:500]
+        self.access_token = str(self.access_token).strip()
+        if len(self.access_token) < 24:
+            self.access_token = secrets.token_urlsafe(32)
+        self.connection_code = str(self.connection_code).strip()[:32_768]
+        self.ssh_identity_file = str(self.ssh_identity_file).strip()[:1000]
+        self.last_connected_at = max(0.0, float(self.last_connected_at or 0.0))
         converted: dict[str, DeviceRecord] = {}
         for device_id, member in dict(self.members).items():
             record = member if isinstance(member, DeviceRecord) else DeviceRecord.from_dict(member)
@@ -273,6 +283,20 @@ class RenderGroup:
         self.updated_at = time.time()
         return chosen.device_id
 
+    def remember_connection(
+        self,
+        connection_code: str,
+        *,
+        ssh_identity_file: str = "",
+        connected_at: float | None = None,
+    ) -> None:
+        """Persist a reusable route without ever storing an embedded private key."""
+        self.connection_code = str(connection_code).strip()[:32_768]
+        if ssh_identity_file.strip():
+            self.ssh_identity_file = ssh_identity_file.strip()[:1000]
+        self.last_connected_at = float(connected_at if connected_at is not None else time.time())
+        self.updated_at = time.time()
+
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
@@ -283,6 +307,10 @@ class RenderGroup:
             "allow_failover": self.allow_failover,
             "coordinator_device_id": self.coordinator_device_id,
             "ssh_endpoint": self.ssh_endpoint,
+            "access_token": self.access_token,
+            "connection_code": self.connection_code,
+            "ssh_identity_file": self.ssh_identity_file,
+            "last_connected_at": self.last_connected_at,
             "members": {device_id: member.to_dict() for device_id, member in self.members.items()},
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -300,6 +328,10 @@ class RenderGroup:
             allow_failover=bool(data.get("allow_failover", True)),
             coordinator_device_id=str(data.get("coordinator_device_id") or ""),
             ssh_endpoint=str(data.get("ssh_endpoint") or ""),
+            access_token=str(data.get("access_token") or ""),
+            connection_code=str(data.get("connection_code") or ""),
+            ssh_identity_file=str(data.get("ssh_identity_file") or ""),
+            last_connected_at=float(data.get("last_connected_at") or 0.0),
             members={
                 str(device_id): DeviceRecord.from_dict(member)
                 for device_id, member in raw_members.items()
@@ -349,7 +381,7 @@ class GroupRegistry:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": 2,
             "identity": self.identity.to_dict(),
             "active_group_id": self.active_group_id,
             "groups": [group.to_dict() for group in self.groups.values()],

@@ -100,6 +100,9 @@ class PairingCode:
     ssh_port: int = 22
     ssh_user: str = ""
     ssh_private_key: str = field(default="", repr=False)
+    group_id: str = ""
+    group_name: str = ""
+    coordinator_device_id: str = ""
 
     def encode(self) -> str:
         payload_data: dict[str, object] = {"h": self.host, "p": self.port, "t": self.token}
@@ -112,6 +115,12 @@ class PairingCode:
         elif self.transport != "lan":
             payload_data["n"] = self.transport
             prefix = "BRW3-"
+        if self.group_id:
+            payload_data["g"] = self.group_id
+        if self.group_name:
+            payload_data["gn"] = self.group_name
+        if self.coordinator_device_id:
+            payload_data["cd"] = self.coordinator_device_id
         payload = json.dumps(payload_data, separators=(",", ":")).encode("utf-8")
         return prefix + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
@@ -134,6 +143,9 @@ class PairingCode:
             ssh_port = int(data.get("sp") or 22)
             ssh_user = str(data.get("su") or "").strip()
             ssh_private_key = str(data.get("sk") or "")
+            group_id = str(data.get("g") or "").strip()
+            group_name = str(data.get("gn") or "").strip()
+            coordinator_device_id = str(data.get("cd") or "").strip()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid Blender Render Watchdog connection code") from error
         if not host or not token or not 1 <= port <= 65535 or transport not in {"lan", "tailscale", "ssh"}:
@@ -150,7 +162,19 @@ class PairingCode:
                 or not ssh_private_key.strip().endswith("-----END OPENSSH PRIVATE KEY-----")
             ):
                 raise ValueError("Invalid Blender Render Watchdog SSH invitation key")
-        return cls(host, port, token, transport, ssh_host, ssh_port, ssh_user, ssh_private_key)
+        return cls(
+            host=host,
+            port=port,
+            token=token,
+            transport=transport,
+            ssh_host=ssh_host,
+            ssh_port=ssh_port,
+            ssh_user=ssh_user,
+            ssh_private_key=ssh_private_key,
+            group_id=group_id,
+            group_name=group_name,
+            coordinator_device_id=coordinator_device_id,
+        )
 
     @property
     def invitation_link(self) -> str:
@@ -158,13 +182,16 @@ class PairingCode:
 
     def without_private_key(self) -> "PairingCode":
         return PairingCode(
-            self.host,
-            self.port,
-            self.token,
-            self.transport,
-            self.ssh_host,
-            self.ssh_port,
-            self.ssh_user,
+            host=self.host,
+            port=self.port,
+            token=self.token,
+            transport=self.transport,
+            ssh_host=self.ssh_host,
+            ssh_port=self.ssh_port,
+            ssh_user=self.ssh_user,
+            group_id=self.group_id,
+            group_name=self.group_name,
+            coordinator_device_id=self.coordinator_device_id,
         )
 
 
@@ -190,6 +217,8 @@ class WorkerState:
     compute_backend: str = "AUTO"
     chunk_size: int | None = None
     current_frames: list[int] = field(default_factory=list)
+    batch_total: int = 0
+    batch_completed: int = 0
     disabled: bool = False
 
     def __post_init__(self) -> None:
@@ -376,6 +405,8 @@ class NetworkRenderPlan:
                 task.started_at = started_at
             worker.current_frames = [task.frame for task in selected]
             worker.current_frame = worker.current_frames[0] if worker.current_frames else None
+            worker.batch_total = len(worker.current_frames)
+            worker.batch_completed = 0
             worker.last_seen = time.time()
             return FrameBatch(list(worker.current_frames), worker.worker_id)
 
@@ -406,6 +437,7 @@ class NetworkRenderPlan:
             worker.last_seen = time.time()
             if frame in worker.current_frames:
                 worker.current_frames.remove(frame)
+            worker.batch_completed = min(worker.batch_total, worker.batch_completed + 1)
             worker.current_frame = worker.current_frames[0] if worker.current_frames else None
             if success:
                 task.status = "completed"
@@ -514,6 +546,7 @@ class RenderCoordinator:
         on_frame: Callable[[int, Path, float], None] | None = None,
         group_id: str = "",
         controller_device_id: str = "",
+        group_name: str = "",
     ) -> None:
         self.bind_host = bind_host
         self.port = port
@@ -532,6 +565,7 @@ class RenderCoordinator:
         self.controller_name = controller_name or socket.gethostname()
         self.group_id = str(group_id or uuid.uuid4().hex)
         self.controller_device_id = str(controller_device_id or "controller")
+        self.group_name = str(group_name or self.controller_name).strip()[:80]
         self.controller_hardware = controller_hardware
         self.on_event = on_event
         self.on_frame = on_frame
@@ -548,13 +582,16 @@ class RenderCoordinator:
         if not self.port:
             raise RuntimeError("Coordinator has not started")
         return PairingCode(
-            self.advertised_host,
-            self.port,
-            self.token,
-            self.transport,
-            self.ssh_host,
-            self.ssh_port,
-            self.ssh_user,
+            host=self.advertised_host,
+            port=self.port,
+            token=self.token,
+            transport=self.transport,
+            ssh_host=self.ssh_host,
+            ssh_port=self.ssh_port,
+            ssh_user=self.ssh_user,
+            group_id=self.group_id,
+            group_name=self.group_name,
+            coordinator_device_id=self.controller_device_id,
         ).encode()
 
     @property
@@ -590,7 +627,15 @@ class RenderCoordinator:
             self.on_trusted_token(token, name)
         if self.require_pairing_code:
             self.rotate_pairing_pin()
-        connection = PairingCode(self.advertised_host, self.port, token, "lan").encode()
+        connection = PairingCode(
+            host=self.advertised_host,
+            port=self.port,
+            token=token,
+            transport="lan",
+            group_id=self.group_id,
+            group_name=self.group_name,
+            coordinator_device_id=self.controller_device_id,
+        ).encode()
         self.event(f"[NETWORK] Trusted device paired: {name}")
         return {"ok": True, "connection_code": connection, "controller": self.controller_name}, 200
 
@@ -685,7 +730,14 @@ class RenderCoordinator:
                         )
                         self._send_json(result, status)
                     elif route == "/api/heartbeat":
-                        self._send_json(coordinator.heartbeat(str(data.get("worker_id") or "")))
+                        self._send_json(
+                            coordinator.heartbeat(
+                                str(data.get("worker_id") or ""),
+                                batch_completed=data.get("batch_completed"),
+                                batch_total=data.get("batch_total"),
+                                current_frame=data.get("current_frame"),
+                            )
+                        )
                     elif route == "/api/result":
                         self._send_json(coordinator.accept_result(data))
                     else:
@@ -793,15 +845,35 @@ class RenderCoordinator:
             "worker_id": worker.worker_id,
             "device_id": worker.device_id,
             "group_id": self.group_id,
+            "group_name": self.group_name,
+            "controller_device_id": self.controller_device_id,
             "reconnected": existing_worker_id is not None,
             "max_workers": MAX_WORKERS,
         }, 200
 
-    def heartbeat(self, worker_id: str) -> dict[str, object]:
+    def heartbeat(
+        self,
+        worker_id: str,
+        *,
+        batch_completed: object = None,
+        batch_total: object = None,
+        current_frame: object = None,
+    ) -> dict[str, object]:
         worker = self.workers.get(worker_id)
         if worker is None or worker.disabled:
             return {"ok": False, "state": "disconnected", "error": "Disconnected by controller"}
         worker.last_seen = time.time()
+        try:
+            if batch_total is not None:
+                worker.batch_total = max(0, min(1000, int(batch_total)))
+            if batch_completed is not None:
+                worker.batch_completed = max(0, min(worker.batch_total, int(batch_completed)))
+            if current_frame is not None:
+                reported_frame = int(current_frame)
+                if reported_frame in worker.current_frames:
+                    worker.current_frame = reported_frame
+        except (TypeError, ValueError):
+            pass
         if self.plan:
             self.plan.release_stale(self.workers)
         return {"ok": True}
@@ -980,6 +1052,8 @@ class RenderCoordinator:
             released = self.plan.release_worker(worker_id) if self.plan else []
             worker.current_frame = None
             worker.current_frames.clear()
+            worker.batch_total = 0
+            worker.batch_completed = 0
             worker.disabled = True
             worker.last_seen = 0.0
         suffix = f"; requeued frames: {', '.join(map(str, released))}" if released else ""
@@ -1011,6 +1085,8 @@ class RenderCoordinator:
             "compute_backend": "AUTO",
             "chunk_size": None,
             "current_frames": [],
+            "batch_total": 0,
+            "batch_completed": 0,
             "disabled": False,
         }
         if local_worker is not None:
@@ -1027,6 +1103,7 @@ class RenderCoordinator:
                 "transport": self.transport,
                 "device_id": self.controller_device_id,
                 "group_id": self.group_id,
+                "group_name": self.group_name,
             },
             "workers": worker_rows,
             "devices": devices,
@@ -1082,6 +1159,7 @@ class NetworkWorker:
         identity_fingerprint: str = "",
         capabilities: DeviceCapabilities | dict[str, object] | None = None,
         compute_backend: str = "AUTO",
+        reconnect_callback: Callable[[], str | None] | None = None,
     ) -> None:
         self.connection = PairingCode.decode(code)
         self.blender = blender
@@ -1100,12 +1178,17 @@ class NetworkWorker:
             self.capabilities = DeviceCapabilities.from_dict(capabilities).to_dict()
         requested_backend = str(compute_backend).strip().upper()
         self.compute_backend = requested_backend if requested_backend in COMPUTE_BACKENDS else "AUTO"
+        self.reconnect_callback = reconnect_callback
         self.worker_id = ""
         self.stop_event = threading.Event()
+        self.connection_failed = threading.Event()
         self._project_id = ""
         self._project_path: Path | None = None
         self.status_snapshot: dict[str, object] = {}
         self._finished_plan_id = ""
+        self.batch_total = 0
+        self.batch_completed = 0
+        self.current_batch_frame: int | None = None
 
     @property
     def base_url(self) -> str:
@@ -1133,6 +1216,7 @@ class NetworkWorker:
         if not result.get("ok"):
             raise ConnectionError(str(result.get("error") or "Connection refused"))
         self.worker_id = str(result["worker_id"])
+        self.connection_failed.clear()
         self.event(f"[NETWORK] Connected to {self.connection.host}:{self.connection.port}")
         self.refresh_status()
         return self.worker_id
@@ -1287,29 +1371,62 @@ class NetworkWorker:
             "-a",
         ]
         started_at = time.monotonic()
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **hidden_subprocess_kwargs(),
-        )
+        log_path = frame_folder / "watchdog_worker.log"
+        self.batch_total = len(ordered)
+        self.batch_completed = 0
+        self.current_batch_frame = ordered[0]
+        last_reported = -1
+
+        def collect_outputs() -> dict[int, Path]:
+            found: dict[int, Path] = {}
+            for path in frame_folder.iterdir():
+                if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+                    continue
+                match = re.search(r"(\d+)(?=\.[^.]+$)", path.name)
+                if match:
+                    found[int(match.group(1))] = path
+            return found
+
+        with log_path.open("w+", encoding="utf-8", errors="replace") as log_stream:
+            process = subprocess.Popen(
+                command,
+                stdout=log_stream,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **hidden_subprocess_kwargs(),
+            )
+            while process.poll() is None:
+                outputs = collect_outputs()
+                completed_count = sum(frame in outputs for frame in ordered)
+                self.batch_completed = completed_count
+                self.current_batch_frame = ordered[min(completed_count, len(ordered) - 1)]
+                if completed_count != last_reported:
+                    self.event(f"[NETWORK] Batch {completed_count}/{len(ordered)}")
+                    last_reported = completed_count
+                if self.stop_event.wait(0.5):
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    break
+            return_code = int(process.wait())
+            outputs = collect_outputs()
+            self.batch_completed = sum(frame in outputs for frame in ordered)
+            self.current_batch_frame = ordered[-1] if self.batch_completed else ordered[0]
+            if self.batch_completed != last_reported:
+                self.event(f"[NETWORK] Batch {self.batch_completed}/{len(ordered)}")
+            log_stream.seek(0)
+            error = log_stream.read()[-2000:]
         elapsed = max(0.0, time.monotonic() - started_at)
-        error = (completed.stdout + completed.stderr)[-2000:]
-        outputs: dict[int, Path] = {}
-        for path in frame_folder.iterdir():
-            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            match = re.search(r"(\d+)(?=\.[^.]+$)", path.name)
-            if match:
-                outputs[int(match.group(1))] = path
         per_frame_seconds = elapsed / len(ordered) if ordered else 0.0
         results = {
             frame: (
-                completed.returncode == 0 and frame in outputs,
+                return_code == 0 and frame in outputs,
                 outputs.get(frame),
-                "" if completed.returncode == 0 and frame in outputs else error or "Blender did not create the frame",
+                "" if return_code == 0 and frame in outputs else error or "Blender did not create the frame",
             )
             for frame in ordered
         }
@@ -1322,14 +1439,21 @@ class NetworkWorker:
                 heartbeat = _request_json(
                     self.base_url + "/api/heartbeat",
                     self.connection.token,
-                    {"worker_id": self.worker_id},
+                    {
+                        "worker_id": self.worker_id,
+                        "batch_completed": self.batch_completed,
+                        "batch_total": self.batch_total,
+                        "current_frame": self.current_batch_frame,
+                    },
                     timeout=15,
                 )
                 if not heartbeat.get("ok") and heartbeat.get("state") == "disconnected":
-                    self.event("[NETWORK] Disconnected by the main computer")
-                    self.stop_event.set()
+                    if not self.connection_failed.is_set():
+                        self.event("[NETWORK] Disconnected by the main computer")
+                        self.stop_event.set()
                     return
             except (OSError, urllib.error.URLError, ConnectionError, json.JSONDecodeError) as error:
+                self.connection_failed.set()
                 self.event(f"[NETWORK] Heartbeat warning: {error}")
 
     def run(
@@ -1344,6 +1468,13 @@ class NetworkWorker:
             self.join()
         while not self.stop_event.is_set():
             try:
+                if self.connection_failed.is_set():
+                    self.event("[NETWORK] Reconnecting to the remembered group…")
+                    if self.reconnect_callback is not None:
+                        replacement_code = self.reconnect_callback()
+                        if replacement_code:
+                            self.connection = PairingCode.decode(replacement_code)
+                    self.join()
                 query = urllib.parse.urlencode({"worker_id": self.worker_id})
                 task = _request_json(self.base_url + f"/api/task?{query}", self.connection.token, timeout=45)
                 state = str(task.get("state") or "")
@@ -1371,6 +1502,9 @@ class NetworkWorker:
                             if isinstance(raw_frames, list) and raw_frames
                             else [int(task["frame"])]
                         )
+                        self.batch_total = len(frames)
+                        self.batch_completed = 0
+                        self.current_batch_frame = frames[0]
                         samples = int(task["samples"]) if task.get("samples") is not None else None
                         self.use_cpu = bool(task.get("use_cpu", self.use_cpu))
                         self.use_gpu = bool(task.get("use_gpu", self.use_gpu))
@@ -1381,10 +1515,13 @@ class NetworkWorker:
                         if self.render_frame:
                             rendered = {}
                             batch_folder = None
-                            for frame in frames:
+                            for index, frame in enumerate(frames, start=1):
+                                self.current_batch_frame = frame
                                 started_at = time.monotonic()
                                 success, output, error = self.render_frame(frame, self._project_path)
                                 rendered[frame] = (success, output, error, max(0.0, time.monotonic() - started_at))
+                                self.batch_completed = index
+                                self.event(f"[NETWORK] Batch {index}/{len(frames)}")
                         else:
                             batch_results, batch_folder = self._render_batch(
                                 frames,
@@ -1438,14 +1575,22 @@ class NetworkWorker:
                 heartbeat = _request_json(
                     self.base_url + "/api/heartbeat",
                     self.connection.token,
-                    {"worker_id": self.worker_id},
+                    {
+                        "worker_id": self.worker_id,
+                        "batch_completed": self.batch_completed,
+                        "batch_total": self.batch_total,
+                        "current_frame": self.current_batch_frame,
+                    },
                     timeout=15,
                 )
                 if not heartbeat.get("ok") and heartbeat.get("state") == "disconnected":
+                    if self.connection_failed.is_set():
+                        continue
                     self.event("[NETWORK] Disconnected by the main computer")
                     return
                 self.refresh_status()
             except (OSError, urllib.error.URLError, ConnectionError, json.JSONDecodeError) as error:
+                self.connection_failed.set()
                 self.event(f"[NETWORK] Connection error: {error}")
                 self.stop_event.wait(max(2.0, poll_seconds))
 
