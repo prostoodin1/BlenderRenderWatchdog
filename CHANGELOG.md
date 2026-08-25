@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.0.1 — 2026-08-25
+
+### Settings navigation
+
+- Restored Settings as a first-class tab in the unified desktop interface.
+- Made the header Settings button switch to the same tab instead of opening a second window.
+- Kept update, power, language, colour, mobile dashboard and LAN security controls together on the restored scrollable page.
+
 ## 3.0.0 — 2026-08-25
 
 ### Unified workspace and project queue

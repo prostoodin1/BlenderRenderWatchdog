@@ -9,7 +9,8 @@ ANDROID = ROOT / "android"
 class AndroidProjectTests(unittest.TestCase):
     def test_android_release_matches_desktop_version(self) -> None:
         build = (ANDROID / "app" / "build.gradle").read_text(encoding="utf-8")
-        self.assertIn('versionName "3.0.0"', build)
+        self.assertIn("versionCode 301", build)
+        self.assertIn('versionName "3.0.1"', build)
         self.assertIn("minSdk 26", build)
 
     def test_native_app_has_required_tabs_and_saved_devices(self) -> None:

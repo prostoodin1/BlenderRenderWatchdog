@@ -1,10 +1,10 @@
-# Blender Render Watchdog 3.0.0
+# Blender Render Watchdog 3.0.1
 
-> Версия 3.0.0 объединяет проекты, очередь, рендер и устройства в одном Workspace, добавляет постоянные группы компьютеров, пакетное распределение кадров и готовые SSH-приглашения для подключения через интернет.
+> Версия 3.0.1 возвращает полноценную вкладку **Settings** в единый интерфейс 3.0 и сохраняет все настройки приложения в одном лёгком прокручиваемом экране.
 
-![Blender Render Watchdog 3.0.0 — Workspace](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.0/BlenderRenderWatchdog-3.0.0-Workspace.jpg)
+![Blender Render Watchdog 3.0.1 — Workspace](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Workspace.jpg)
 
-![Blender Render Watchdog 3.0.0 — SSH](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.0/BlenderRenderWatchdog-3.0.0-SSH.jpg)
+![Blender Render Watchdog 3.0.1 — Settings](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Settings.jpg)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -17,6 +17,12 @@
 > В версии 2.1.1 в **Settings → Interface** добавлен мгновенный выбор языка: English и Русский. Выбор сохраняется между запусками.
 
 Windows-приложение для надёжного фонового рендера Blender. Watchdog продолжает анимацию после сбоя, управляет очередью проектов, распределяет кадры между компьютерами и показывает состояние рендера на телефоне.
+
+## Что нового в 3.0.1
+
+- вкладка **Settings** снова находится в основной панели рядом с Workspace, Insights, Sandbox, Advanced и Logs;
+- верхняя кнопка **Settings** теперь переключает на эту же вкладку и не создаёт тяжёлое дополнительное окно;
+- обновления, выключение после рендера, язык, цветовая тема, мобильная панель, код доступа и восстановление после перезапуска собраны на одном прокручиваемом экране.
 
 ## Что нового в 3.0.0
 
