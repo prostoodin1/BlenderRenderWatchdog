@@ -20,6 +20,22 @@ GROUP_SECURITY_MODES = {"open", "approval", "code"}
 DEVICE_ROLES = {"coordinator", "worker"}
 
 
+def infer_compute_backends(gpus: Iterable[object], system_name: str = "") -> list[str]:
+    """Return Blender Cycles backends that are plausible for detected hardware."""
+    labels = " ".join(str(gpu) for gpu in gpus).casefold()
+    system = str(system_name).casefold()
+    backends: list[str] = []
+    if "nvidia" in labels or "geforce" in labels or "quadro" in labels or "rtx" in labels:
+        backends.extend(["OPTIX", "CUDA"])
+    if "amd" in labels or "radeon" in labels:
+        backends.append("HIP")
+    if "intel" in labels or "arc" in labels:
+        backends.append("ONEAPI")
+    if system in {"darwin", "macos", "mac"}:
+        backends.append("METAL")
+    return _clean_strings(backends)
+
+
 def _clean_strings(values: Iterable[object], limit: int = 32) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()

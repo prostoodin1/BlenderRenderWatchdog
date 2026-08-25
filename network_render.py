@@ -115,6 +115,8 @@ class PairingCode:
     @classmethod
     def decode(cls, value: str) -> "PairingCode":
         value = value.strip()
+        if value.casefold().startswith("brw://join/"):
+            value = value[len("brw://join/"):].strip()
         if not value.startswith(("BRW2-", "BRW3-", "BRW4-")):
             raise ValueError("Invalid Blender Render Watchdog connection code")
         encoded = value[5:]
@@ -217,6 +219,8 @@ if scene.render.engine == "CYCLES":
         for device in prefs.devices:
             device.use = bool(device.type != "CPU" or USE_CPU)
     else:
+        if USE_GPU and not USE_CPU:
+            raise RuntimeError("Requested GPU backend is unavailable on this worker")
         scene.cycles.device = "CPU"
         try:
             prefs.get_devices()
@@ -523,6 +527,10 @@ class RenderCoordinator:
             self.ssh_port,
             self.ssh_user,
         ).encode()
+
+    @property
+    def invitation_link(self) -> str:
+        return f"brw://join/{self.pairing_code}"
 
     @staticmethod
     def _new_pairing_pin() -> str:

@@ -67,7 +67,7 @@ def decode_announcement(payload: bytes, sender_host: str = "") -> DiscoveredCont
             group_id=str(data.get("group_id") or data.get("controller_id") or "").strip(),
             group_name=str(data.get("group_name") or data.get("name") or "").strip(),
             coordinator_device_id=str(data.get("coordinator_device_id") or "").strip(),
-            device_count=max(0, int(data.get("device_count") or 0)),
+            device_count=max(0, int(data.get("device_count") or 1)),
             security_mode=str(data.get("security_mode") or ("code" if data.get("requires_code", True) else "open")),
             joinable=bool(data.get("joinable", True)),
             coordinator_online=bool(data.get("coordinator_online", True)),
@@ -89,6 +89,11 @@ class LanDiscoveryAdvertiser:
         self._stop = threading.Event()
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
+        self._lock = threading.RLock()
+
+    def update(self, controller: DiscoveredController) -> None:
+        with self._lock:
+            self.controller = controller
 
     def start(self) -> None:
         if self._thread is not None:
@@ -104,7 +109,6 @@ class LanDiscoveryAdvertiser:
 
     def _serve(self) -> None:
         assert self._socket is not None
-        announcement = encode_announcement(self.controller)
         while not self._stop.is_set():
             try:
                 payload, address = self._socket.recvfrom(512)
@@ -115,6 +119,8 @@ class LanDiscoveryAdvertiser:
             if payload.strip() not in {DISCOVERY_QUERY, LEGACY_DISCOVERY_QUERY}:
                 continue
             try:
+                with self._lock:
+                    announcement = encode_announcement(self.controller)
                 self._socket.sendto(announcement, address)
             except OSError:
                 continue

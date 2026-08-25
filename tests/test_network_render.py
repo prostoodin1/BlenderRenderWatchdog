@@ -29,6 +29,10 @@ class PairingCodeTests(unittest.TestCase):
         self.assertTrue(ssh.encode().startswith("BRW4-"))
         self.assertEqual(PairingCode.decode(ssh.encode()), ssh)
 
+    def test_invitation_link_decodes_like_a_connection_code(self) -> None:
+        connection = PairingCode("127.0.0.1", 48620, "secret")
+        self.assertEqual(PairingCode.decode(f"brw://join/{connection.encode()}"), connection)
+
 
 class SchedulerTests(unittest.TestCase):
     def test_fixed_chunk_claims_contiguous_frames(self) -> None:
@@ -305,6 +309,7 @@ class CoordinatorHttpTests(unittest.TestCase):
         self.assertIn("SAMPLES = 128", script)
         self.assertIn('scene.cycles.device = "GPU"', script)
         self.assertIn("COMPUTE_BACKEND = 'OPTIX'", script)
+        self.assertIn("Requested GPU backend is unavailable", script)
 
     def test_worker_backend_must_be_supported_when_capabilities_are_known(self) -> None:
         coordinator = RenderCoordinator()

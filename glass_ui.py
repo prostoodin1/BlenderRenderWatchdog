@@ -656,6 +656,49 @@ class GlassWidgetFactory:
         return getattr(self.ttk, name)
 
 
+class ConnectionStatusIcon(tk.Canvas):
+    """Small code-native network glyph with an explicit connection state."""
+
+    STATE_COLOURS = {
+        "offline": "muted",
+        "searching": "accent_blue",
+        "connected": "accent_green",
+        "host": "accent",
+        "error": "danger",
+    }
+
+    def __init__(self, parent, *, palette=None, state: str = "offline", backdrop=None, **kwargs) -> None:
+        self.palette = {**DEFAULT_PALETTE, **(palette or {})}
+        self.state = state
+        super().__init__(
+            parent,
+            width=38,
+            height=38,
+            background=backdrop or self.palette["panel"],
+            borderwidth=0,
+            highlightthickness=0,
+            **kwargs,
+        )
+        self.bind("<Configure>", lambda _event: self._draw())
+        self.after_idle(self._draw)
+
+    def set_state(self, state: str) -> None:
+        self.state = state if state in self.STATE_COLOURS else "offline"
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        colour = self.palette[self.STATE_COLOURS.get(self.state, "muted")]
+        muted_line = blend_hex(self.palette["line"], colour, 0.55)
+        rounded_rectangle(self, 1, 1, 37, 37, 12, fill=self.palette["panel_alt"], outline=muted_line, width=1)
+        points = ((11, 25), (19, 11), (28, 25))
+        self.create_line(points[0][0], points[0][1], points[1][0], points[1][1], fill=muted_line, width=2)
+        self.create_line(points[1][0], points[1][1], points[2][0], points[2][1], fill=muted_line, width=2)
+        self.create_line(points[0][0], points[0][1], points[2][0], points[2][1], fill=muted_line, width=2)
+        for x, y in points:
+            self.create_oval(x - 4, y - 4, x + 4, y + 4, fill=colour, outline=self.palette["panel"], width=2)
+
+
 class GlassCard(tk.Canvas):
     """Rounded panel with a matte fill, soft shadow and a real ttk content frame."""
 

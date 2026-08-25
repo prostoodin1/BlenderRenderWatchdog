@@ -3,10 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from device_groups import DeviceCapabilities, DeviceIdentity, GroupRegistry, RenderGroup
+from device_groups import DeviceCapabilities, DeviceIdentity, GroupRegistry, RenderGroup, infer_compute_backends
 
 
 class DeviceGroupTests(unittest.TestCase):
+    def test_compute_backends_are_inferred_from_gpu_vendor(self) -> None:
+        self.assertEqual(infer_compute_backends(["NVIDIA GeForce RTX 4090"]), ["OPTIX", "CUDA"])
+        self.assertEqual(infer_compute_backends(["AMD Radeon RX 7900"]), ["HIP"])
+        self.assertEqual(infer_compute_backends(["Intel Arc A770"]), ["ONEAPI"])
+
     def test_device_identity_survives_registry_round_trip(self) -> None:
         registry = GroupRegistry(DeviceIdentity("device-a-123456789", "secret-value-that-is-long-enough"))
         registry.create_group("Studio", "approval")

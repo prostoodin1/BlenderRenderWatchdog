@@ -34,7 +34,8 @@ from access_codes import (
 )
 from auto_fix import AutoFixIssue, apply_safe_fixes, inspect_render_setup
 from appearance import THEME_LABELS, build_palette, normalize_color, normalize_theme
-from glass_ui import GlassCard, GlassTabView, GlassWidgetFactory
+from device_groups import DeviceCapabilities, GroupRegistry, RenderGroup, infer_compute_backends
+from glass_ui import ConnectionStatusIcon, GlassCard, GlassTabView, GlassWidgetFactory
 from localization import LANGUAGE_LABELS, language_code_from_label, normalize_language, translate
 from lan_discovery import DiscoveredController, LanDiscoveryAdvertiser, discover_controllers
 from mobile_dashboard import MobileDashboardServer
@@ -84,6 +85,7 @@ LEGACY_CONFIG_PATH = Path(__file__).with_name("blender_render_watchdog_config.js
 CONFIG_PATH = app_config_dir() / "blender_render_watchdog_config.json"
 QUEUE_PATH = app_config_dir() / "render_queue.json"
 HISTORY_PATH = app_config_dir() / "render_history.json"
+GROUPS_PATH = app_config_dir() / "render_groups.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
 APP_VERSION = "2.6.0"
@@ -290,8 +292,9 @@ import bpy
 
 USE_CPU = {use_cpu!r}
 USE_GPU = {use_gpu!r}
-BACKENDS = {list(COMPUTE_BACKENDS)!r}
 OPTIMIZE = {optimize_options!r}
+REQUESTED_BACKEND = str(OPTIMIZE.get("compute_backend", "AUTO")).upper()
+BACKENDS = (REQUESTED_BACKEND,) if REQUESTED_BACKEND != "AUTO" else {tuple(COMPUTE_BACKENDS)!r}
 
 
 def set_if_exists(target, name, value):
@@ -331,6 +334,8 @@ else:
             device.use = bool(device.type != "CPU" or USE_CPU)
             print(f"[WATCHDOG] Device {{device.name}} ({{device.type}}): {{'ON' if device.use else 'OFF'}}")
     else:
+        if USE_GPU and not USE_CPU:
+            raise RuntimeError("Requested GPU backend is unavailable on this computer")
         scene.cycles.device = "CPU"
         try:
             prefs.get_devices()
@@ -1396,7 +1401,7 @@ def run_watchdog(
 
 def run_gui(args: argparse.Namespace) -> int:
     import tkinter as tk
-    from tkinter import colorchooser, filedialog, messagebox, scrolledtext, ttk
+    from tkinter import colorchooser, filedialog, messagebox, scrolledtext, simpledialog, ttk
 
     class WatchdogApp:
         def __init__(self, root: tk.Tk) -> None:
@@ -1422,6 +1427,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.paused_queue = False
             self.active_queue_job_id: str | None = None
             self.render_queue = RenderQueue.load(QUEUE_PATH)
+            self.group_registry = GroupRegistry.load(GROUPS_PATH)
             self.render_history = RenderHistory.load(HISTORY_PATH)
             self.network_controller: RenderCoordinator | None = None
             self.network_worker: NetworkWorker | None = None
@@ -1430,6 +1436,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.discovered_controllers: dict[str, DiscoveredController] = {}
             self.lan_discovery_running = False
             self.last_lan_discovery_at = 0.0
+            self.last_group_save_at = 0.0
             self.ssh_tunnel: SshTunnel | None = None
             self.network_device_dialog = None
             self.mobile_dashboard: MobileDashboardServer | None = None
@@ -1462,6 +1469,28 @@ def run_gui(args: argparse.Namespace) -> int:
             cpu_name, gpu_names = detect_hardware()
             self.cpu_name = cpu_name
             self.gpu_names = gpu_names
+            self.local_capabilities = DeviceCapabilities(
+                cpu=cpu_name,
+                gpus=gpu_names,
+                compute_backends=infer_compute_backends(gpu_names, platform.system()),
+                platform=f"{platform.system()} {platform.release()}",
+            )
+            if self.group_registry.active is None:
+                migrated_group_name = self.config.get("network_group_name") or self.config.get("network_controller_name") or "My render group"
+                migrated_security = "code" if self.config.get("network_require_pairing", "1") != "0" else "open"
+                self.group_registry.create_group(migrated_group_name, migrated_security)
+            active_group = self.group_registry.active
+            assert active_group is not None
+            if active_group.security_mode == "approval":
+                active_group.security_mode = "code"
+            active_group.register_device(
+                self.group_registry.identity.device_id,
+                platform.node() or "This PC",
+                identity_fingerprint=self.group_registry.identity.fingerprint,
+                capabilities=self.local_capabilities,
+                role="coordinator" if active_group.owner_device_id == self.group_registry.identity.device_id else "worker",
+            )
+            self.group_registry.save(GROUPS_PATH)
             self.cpu_info_var = tk.StringVar(value=cpu_name)
             self.gpu_info_var = tk.StringVar(value="; ".join(gpu_names))
 
@@ -1508,6 +1537,11 @@ def run_gui(args: argparse.Namespace) -> int:
             self.video_format_var = tk.StringVar(value=self.config.get("video_format", "MP4 (H.264)"))
             self.video_fps_var = tk.StringVar(value=self.config.get("video_fps", "24"))
             self.smart_queue_var = tk.BooleanVar(value=(self.config.get("smart_queue", "1") != "0"))
+            self.chunk_mode_var = tk.StringVar(value=self.config.get("chunk_mode", "adaptive"))
+            self.chunk_size_var = tk.StringVar(value=self.config.get("chunk_size", "10"))
+            self.render_device_mode_var = tk.StringVar(value=self.config.get("render_device_mode", "AUTO"))
+            self.compute_backend_var = tk.StringVar(value=self.config.get("compute_backend", "AUTO"))
+            self.active_project_var = tk.StringVar(value="No active project")
             self.update_manifest_url_var = tk.StringVar(value=normalize_update_source(self.config.get("update_manifest_url")))
             self.check_updates_on_start_var = tk.BooleanVar(value=(self.config.get("check_updates_on_start", "1") == "1"))
             self.auto_install_updates_var = tk.BooleanVar(value=(self.config.get("auto_install_updates", "0") == "1"))
@@ -1536,7 +1570,13 @@ def run_gui(args: argparse.Namespace) -> int:
             self.network_use_local_var = tk.BooleanVar(value=(self.config.get("network_use_local", "1") != "0"))
             self.network_advertise_lan_var = tk.BooleanVar(value=(self.config.get("network_advertise_lan", "1") != "0"))
             self.network_require_pairing_var = tk.BooleanVar(value=(self.config.get("network_require_pairing", "1") != "0"))
-            self.network_controller_id = self.config.get("network_controller_id") or uuid.uuid4().hex
+            self.network_controller_id = active_group.group_id
+            self.network_group_name_var = tk.StringVar(value=active_group.name)
+            self.network_group_selector_var = tk.StringVar(value="")
+            self.saved_group_labels: dict[str, RenderGroup] = {}
+            self.network_group_security_var = tk.StringVar(value=active_group.security_mode)
+            self.network_group_security_label_var = tk.StringVar()
+            self.network_allow_failover_var = tk.BooleanVar(value=active_group.allow_failover)
             self.network_pairing_pin_var = tk.StringVar(value="—")
             self.network_pairing_input_var = tk.StringVar(value="")
             self.lan_controller_var = tk.StringVar(value="")
@@ -1562,9 +1602,12 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.network_progress_text_var, "Waiting for network render")
             self.set_localized(self.network_eta_var, "No ETA yet")
             self.update_network_transport_label()
+            self.update_group_security_label()
             self.worker_range_start_var = tk.StringVar(value="")
             self.worker_range_end_var = tk.StringVar(value="")
             self.worker_samples_var = tk.StringVar(value="")
+            self.worker_backend_var = tk.StringVar(value="AUTO")
+            self.worker_chunk_size_var = tk.StringVar(value="")
             self.sandbox_frame_var = tk.StringVar(value="1")
             self.sandbox_parallel_var = tk.BooleanVar(value=False)
             self.sandbox_status_var = tk.StringVar()
@@ -1576,6 +1619,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
             self.build_style(ttk)
             self.build_layout(tk, ttk, scrolledtext)
+            self.initialize_active_project()
             self.bind_config_autosave()
             self.update_manual_controls()
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1668,6 +1712,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.update_network_transport_label()
             if hasattr(self, "network_transport_combo"):
                 self.network_transport_combo.configure(values=self.localized_network_transport_labels())
+            self.update_group_security_label()
+            if hasattr(self, "network_group_security_combo"):
+                self.network_group_security_combo.configure(values=self.localized_group_security_labels())
             self.save_current_config()
 
         def localized_theme_labels(self) -> tuple[str, ...]:
@@ -1694,6 +1741,25 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def localized_network_transport_labels(self) -> tuple[str, ...]:
             return (self.tr("Local network (LAN)"), self.tr("SSH tunnel"))
+
+        def localized_group_security_labels(self) -> tuple[str, ...]:
+            return (self.tr("Open group"), self.tr("Code required"))
+
+        def update_group_security_label(self) -> None:
+            source = {
+                "open": "Open group",
+                "code": "Code required",
+            }.get(self.network_group_security_var.get(), "Code required")
+            self.network_group_security_label_var.set(self.tr(source))
+
+        def change_group_security(self, _event=None) -> None:
+            selected = self.network_group_security_label_var.get().strip().casefold()
+            labels = {
+                self.tr("Open group").casefold(): "open",
+                self.tr("Code required").casefold(): "code",
+            }
+            self.network_group_security_var.set(labels.get(selected, "code"))
+            self.apply_group_security()
 
         def update_network_transport_label(self) -> None:
             label = "SSH tunnel" if self.network_transport == "ssh" else "Local network (LAN)"
@@ -1933,6 +1999,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 font=("Segoe UI", 9, "bold"),
             )
         def build_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
+            self.build_unified_layout(tk_module, ttk_module, scrolledtext_module)
+
+        def build_legacy_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
+            """Retained temporarily for compatibility while the unified UI settles."""
             self.tab_scroll_canvases.clear()
             self.tab_scroll_refreshers.clear()
             c = self.colors
@@ -2159,6 +2229,578 @@ def run_gui(args: argparse.Namespace) -> int:
             self.notebook.bind("<<NotebookTabChanged>>", self.animate_tab_change)
             self.root.after_idle(self.refresh_tab_scroll_regions)
             self.root.after(250, self.refresh_tab_scroll_regions)
+
+        def build_unified_layout(self, tk_module, ttk_module, scrolledtext_module) -> None:
+            """Build the compact workspace used by the redesigned desktop UI."""
+            self.tab_scroll_canvases.clear()
+            self.tab_scroll_refreshers.clear()
+            c = self.colors
+            ui = GlassWidgetFactory(
+                ttk_module,
+                c,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+            )
+            outer = ui.Frame(self.root, style="App.TFrame", padding=(20, 16, 20, 18))
+            outer.pack(fill="both", expand=True)
+            outer.columnconfigure(0, weight=1)
+            outer.rowconfigure(1, weight=1)
+
+            header = ui.Frame(outer, style="Top.TFrame")
+            header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+            header.columnconfigure(1, weight=1)
+            ui.Label(header, text="Blender Render Watchdog", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
+            project_head = ui.Frame(header, style="Top.TFrame")
+            project_head.grid(row=0, column=1, sticky="w", padx=(24, 0))
+            ui.Label(project_head, text="ACTIVE PROJECT", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(project_head, textvariable=self.active_project_var, style="Chip.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 0))
+            header_actions = ui.Frame(header, style="Top.TFrame")
+            header_actions.grid(row=0, column=2, sticky="e")
+            ui.Button(header_actions, text="Settings", command=self.open_settings_window).grid(row=0, column=0, padx=(0, 8))
+            self.status_card = GlassCard(
+                header_actions,
+                palette=c,
+                padding=16,
+                radius=18,
+                backdrop=c["bg"],
+                effects_enabled=False,
+            )
+            self.status_card.grid(row=0, column=1, sticky="e")
+            status_content = self.status_card.content
+            ui.Label(status_content, textvariable=self.status_var, style="Status.TLabel").pack(anchor="w")
+            ui.Label(status_content, textvariable=self.status_detail_var, style="StatusDetail.TLabel").pack(anchor="w", pady=(2, 0))
+            self.status_trace_id = self.status_var.trace_add("write", lambda *_args: self.status_card.pulse())
+
+            self.notebook = GlassTabView(
+                outer,
+                palette=c,
+                translator=self.tr,
+                register=self.register_localizable_widget,
+                lightweight=True,
+            )
+            self.notebook.grid(row=1, column=0, sticky="nsew")
+
+            def scrollable_page(text: str):
+                shell = ui.Frame(self.notebook.page_host, style="App.TFrame", padding=(0, 8, 0, 0))
+                shell.columnconfigure(0, weight=1)
+                shell.rowconfigure(0, weight=1)
+                canvas = tk_module.Canvas(
+                    shell,
+                    background=c["bg"],
+                    borderwidth=0,
+                    highlightthickness=0,
+                    yscrollincrement=28,
+                )
+                scrollbar = ui.Scrollbar(shell, orient="vertical", command=canvas.yview)
+                canvas.configure(yscrollcommand=scrollbar.set)
+                canvas.grid(row=0, column=0, sticky="nsew")
+                scrollbar.grid(row=0, column=1, sticky="ns", padx=(7, 0))
+                content = ui.Frame(canvas, style="App.TFrame")
+                window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+                def sync_scroll_region(_event=None) -> None:
+                    width = max(1, canvas.winfo_width())
+                    height = max(content.winfo_reqheight(), canvas.winfo_height())
+                    canvas.itemconfigure(window_id, width=width, height=height)
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+
+                content.bind("<Configure>", sync_scroll_region, add="+")
+                canvas.bind("<Configure>", sync_scroll_region, add="+")
+                self.tab_scroll_canvases.append(canvas)
+                self.tab_scroll_refreshers.append(sync_scroll_region)
+                self.notebook.add(shell, text=text)
+                return content
+
+            workspace = scrollable_page("  Workspace  ")
+            workspace.columnconfigure(0, weight=3, minsize=260)
+            workspace.columnconfigure(1, weight=5, minsize=390)
+            workspace.columnconfigure(2, weight=4, minsize=350)
+            workspace.rowconfigure(0, weight=1)
+
+            self.build_workspace_queue(workspace, ui)
+            self.build_workspace_render(workspace, ui)
+            self.build_workspace_network(workspace, ui)
+
+            insights_page = scrollable_page("  Insights  ")
+            insights_page.columnconfigure(0, weight=1)
+            sandbox_page = scrollable_page("  Sandbox  ")
+            sandbox_page.columnconfigure(0, weight=1)
+            advanced_page = scrollable_page("  Advanced  ")
+            advanced_page.columnconfigure(0, weight=1)
+            logs_page = scrollable_page("  Logs  ")
+            logs_page.columnconfigure(0, weight=1)
+            logs_page.rowconfigure(0, weight=1)
+
+            self.build_insights_tab(insights_page, ui)
+            self.build_sandbox_tab(sandbox_page, ui)
+            self.build_advanced_tab(advanced_page, ui)
+
+            console_card = self.make_card(logs_page, ui, row=0, column=0, sticky="nsew")
+            console_card.rowconfigure(1, weight=1)
+            console_card.columnconfigure(0, weight=1)
+            console_head = ui.Frame(console_card, style="Surface.TFrame")
+            console_head.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            console_head.columnconfigure(0, weight=1)
+            ui.Label(console_head, text="Live Console", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(console_head, text="Blender output and recovery events", style="CardHint.TLabel").grid(row=0, column=1, sticky="e")
+            self.log_text = scrolledtext_module.ScrolledText(
+                console_card,
+                bg=c["field"],
+                fg="#dfe7f3",
+                insertbackground=c["text"],
+                selectbackground="#28415f",
+                relief="flat",
+                borderwidth=0,
+                font=("Cascadia Mono", 10),
+                wrap="word",
+                height=28,
+            )
+            self.log_text.grid(row=1, column=0, sticky="nsew")
+            self.log_text.tag_configure("frame", foreground=c["accent"])
+            self.log_text.tag_configure("error", foreground=c["danger"])
+            self.log_text.tag_configure("watchdog", foreground=c["warning"])
+
+            if not self.mousewheel_bound:
+                self.root.bind_all("<MouseWheel>", self.on_tab_mousewheel, add="+")
+                self.mousewheel_bound = True
+            self.notebook.bind("<<NotebookTabChanged>>", self.animate_tab_change)
+            self.update_network_role_view()
+            self.update_network_range_mode_view()
+            self.apply_render_device_mode()
+            self.refresh_queue_tree()
+            self.root.after_idle(self.refresh_tab_scroll_regions)
+
+        def build_workspace_queue(self, parent, ui) -> None:
+            card = self.make_card(parent, ui, row=0, column=0, sticky="nsew", padx=(0, 7))
+            card.columnconfigure(0, weight=1)
+            card.rowconfigure(2, weight=1)
+            ui.Label(card, text="Projects", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(card, text="One queue, one active project", style="CardHint.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 12))
+
+            columns = ("index", "project", "range", "mode", "estimate", "output", "status")
+            self.queue_tree = ui.Treeview(
+                card,
+                columns=columns,
+                displaycolumns=("project", "status"),
+                show="headings",
+                selectmode="browse",
+                style="Queue.Treeview",
+                height=15,
+            )
+            self.register_heading(self.queue_tree, "project", "Project")
+            self.register_heading(self.queue_tree, "status", "Status")
+            self.queue_tree.column("project", width=170, minwidth=110, stretch=True)
+            self.queue_tree.column("status", width=80, minwidth=70, anchor="center", stretch=False)
+            self.queue_tree.grid(row=2, column=0, sticky="nsew")
+            self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_project_selected)
+
+            actions = ui.Frame(card, style="Surface.TFrame")
+            actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            actions.columnconfigure(0, weight=1)
+            ui.Button(actions, text="Add files", command=self.add_files_to_queue).grid(row=0, column=0, sticky="w")
+            ui.Button(actions, text="Add current", command=self.add_current_to_queue).grid(row=0, column=1, padx=(6, 0))
+            ui.Button(actions, text="Remove", command=self.remove_queue_job).grid(row=0, column=2, padx=(6, 0))
+            move_row = ui.Frame(card, style="Surface.TFrame")
+            move_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+            move_row.columnconfigure(0, weight=1)
+            self.queue_summary_var = tk.StringVar()
+            self.set_localized(self.queue_summary_var, "Queue is empty")
+            ui.Label(move_row, textvariable=self.queue_summary_var, style="CardHint.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Button(move_row, text="↑", width=3, command=lambda: self.move_queue_job(-1)).grid(row=0, column=1)
+            ui.Button(move_row, text="↓", width=3, command=lambda: self.move_queue_job(1)).grid(row=0, column=2, padx=(4, 0))
+            self.start_queue_button = ui.Button(card, text="Render queue", style="Primary.TButton", command=self.start_render_queue)
+            self.start_queue_button.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+
+        def build_workspace_render(self, parent, ui) -> None:
+            column = ui.Frame(parent, style="App.TFrame")
+            column.grid(row=0, column=1, sticky="nsew", padx=7)
+            column.columnconfigure(0, weight=1)
+
+            setup = self.make_card(column, ui, row=0, column=0, sticky="ew")
+            setup.columnconfigure(1, weight=1)
+            ui.Label(setup, text="Active project", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+            ui.Label(setup, textvariable=self.active_project_var, style="CardHint.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 10))
+            self.add_path_row(setup, ui, 2, ".blend", self.blend_var, self.choose_blend)
+            self.frames_row_widgets = self.add_path_row(setup, ui, 3, "Output", self.frames_var, self.choose_frames)
+            ui.Checkbutton(
+                setup,
+                text="Project output",
+                variable=self.use_scene_output_var,
+                command=self.on_scene_output_toggle,
+                style="Modern.TCheckbutton",
+            ).grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(6, 0))
+            blender_row = ui.Frame(setup, style="Surface.TFrame")
+            blender_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+            blender_row.columnconfigure(1, weight=1)
+            ui.Label(blender_row, text="Blender", style="Field.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Entry(blender_row, textvariable=self.blender_var).grid(row=0, column=1, sticky="ew", padx=(10, 8))
+            ui.Button(blender_row, text="Browse", command=self.choose_blender).grid(row=0, column=2)
+
+            distribution = self.make_card(column, ui, row=1, column=0, sticky="ew", pady=(12, 0))
+            distribution.columnconfigure(1, weight=1)
+            ui.Label(distribution, text="Render strategy", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+            ui.Label(
+                distribution,
+                text="Automatic hardware and frame chunks",
+                style="CardHint.TLabel",
+                wraplength=410,
+                justify="left",
+            ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 12))
+            ui.Label(distribution, text="Device", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=4)
+            device_combo = ui.Combobox(
+                distribution,
+                textvariable=self.render_device_mode_var,
+                values=("AUTO", "GPU", "CPU_GPU", "CPU"),
+                state="readonly",
+            )
+            device_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=4)
+            device_combo.bind("<<ComboboxSelected>>", self.apply_render_device_mode)
+            ui.Label(distribution, text="Cycles", style="Field.TLabel").grid(row=3, column=0, sticky="w", pady=4)
+            backend_values = tuple(dict.fromkeys(["AUTO", *self.local_capabilities.compute_backends]))
+            ui.Combobox(
+                distribution,
+                textvariable=self.compute_backend_var,
+                values=backend_values,
+                state="readonly",
+            ).grid(row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=4)
+            ui.Label(distribution, text="Assignment", style="Field.TLabel").grid(row=4, column=0, sticky="w", pady=4)
+            chunk_mode = ui.Combobox(distribution, textvariable=self.chunk_mode_var, values=("adaptive", "fixed"), state="readonly", width=12)
+            chunk_mode.grid(row=4, column=1, sticky="ew", padx=(12, 5), pady=4)
+            ui.Combobox(distribution, textvariable=self.chunk_size_var, values=("1", "5", "10", "20", "50"), width=8).grid(row=4, column=2, sticky="ew", padx=(5, 0), pady=4)
+
+            progress = self.make_card(column, ui, row=2, column=0, sticky="ew", pady=(12, 0))
+            progress.columnconfigure(0, weight=1)
+            progress_head = ui.Frame(progress, style="Surface.TFrame")
+            progress_head.grid(row=0, column=0, sticky="ew")
+            progress_head.columnconfigure(0, weight=1)
+            ui.Label(progress_head, text="Render", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(progress_head, textvariable=self.progress_text_var, style="ProgressText.TLabel").grid(row=0, column=1, sticky="e")
+            ui.Label(progress, textvariable=self.remaining_time_var, style="CardHint.TLabel").grid(row=1, column=0, sticky="w", pady=(4, 10))
+            self.progress_bar = ui.Progressbar(progress, variable=self.progress_var, maximum=100, mode="determinate", style="Modern.Horizontal.TProgressbar")
+            self.progress_bar.grid(row=2, column=0, sticky="ew")
+            controls = ui.Frame(progress, style="Surface.TFrame")
+            controls.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+            controls.columnconfigure(0, weight=1)
+            self.start_button = ui.Button(controls, text="Start render", style="Primary.TButton", command=self.start_watchdog)
+            self.start_button.grid(row=0, column=0, sticky="ew")
+            self.pause_button = ui.Button(controls, text="Pause", command=self.pause_watchdog, state="disabled")
+            self.pause_button.grid(row=0, column=1, padx=(7, 0))
+            self.stop_button = ui.Button(controls, text="Stop", style="Danger.TButton", command=self.stop_watchdog, state="disabled")
+            self.stop_button.grid(row=0, column=2, padx=(7, 0))
+
+        def build_workspace_network(self, parent, ui) -> None:
+            column = ui.Frame(parent, style="App.TFrame")
+            column.grid(row=0, column=2, sticky="nsew", padx=(7, 0))
+            column.columnconfigure(0, weight=1)
+
+            group_card = self.make_card(column, ui, row=0, column=0, sticky="ew")
+            group_card.columnconfigure(0, weight=1)
+            group_head = ui.Frame(group_card, style="Surface.TFrame")
+            group_head.grid(row=0, column=0, sticky="ew")
+            group_head.columnconfigure(1, weight=1)
+            self.connection_status_icon = ConnectionStatusIcon(group_head, palette=self.colors, state="offline", backdrop=self.colors["panel"])
+            self.connection_status_icon.grid(row=0, column=0, sticky="w", padx=(0, 9))
+            ui.Label(group_head, text="Render group", style="CardTitle.TLabel").grid(row=0, column=1, sticky="w")
+            ui.Button(group_head, text="New group", command=self.create_new_render_group).grid(row=0, column=2, sticky="e", padx=(0, 6))
+            ui.Button(group_head, text="Connection", command=self.open_connection_settings).grid(row=0, column=3, sticky="e")
+            role_row = ui.Frame(group_card, style="Surface.TFrame")
+            self.network_group_selector = ui.Combobox(
+                group_card,
+                textvariable=self.network_group_selector_var,
+                state="readonly",
+            )
+            self.network_group_selector.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            self.network_group_selector.bind("<<ComboboxSelected>>", self.switch_saved_render_group)
+            self.refresh_saved_group_selector()
+            role_row.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+            role_row.columnconfigure(0, weight=1)
+            role_row.columnconfigure(1, weight=1)
+            ui.Button(role_row, text="Main PC", command=lambda: self.set_network_role("host")).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            ui.Button(role_row, text="Join group", command=lambda: self.set_network_role("connect")).grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+            host_controls = ui.Frame(group_card, style="Surface.TFrame")
+            host_controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            host_controls.columnconfigure(0, weight=1)
+            self.network_controller_card = host_controls
+            ui.Entry(host_controls, textvariable=self.network_group_name_var).grid(row=0, column=0, sticky="ew")
+            self.network_group_security_combo = ui.Combobox(
+                host_controls,
+                textvariable=self.network_group_security_label_var,
+                values=self.localized_group_security_labels(),
+                state="readonly",
+            )
+            self.network_group_security_combo.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+            self.network_group_security_combo.bind("<<ComboboxSelected>>", self.change_group_security)
+            options = ui.Frame(host_controls, style="Surface.TFrame")
+            options.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            ui.Checkbutton(options, text="Visible on LAN", variable=self.network_advertise_lan_var, command=self.apply_lan_visibility_settings, style="Modern.TCheckbutton").grid(row=0, column=0, sticky="w")
+            ui.Checkbutton(options, text="Auto main", variable=self.network_allow_failover_var, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=1, column=0, sticky="w", pady=(4, 0))
+            host_actions = ui.Frame(host_controls, style="Surface.TFrame")
+            host_actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            host_actions.columnconfigure(0, weight=1)
+            ui.Button(host_actions, text="Start group", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0, sticky="ew")
+            ui.Button(host_actions, text="Stop", command=self.stop_network_controller).grid(row=0, column=1, padx=(7, 0))
+            ui.Entry(host_controls, textvariable=self.network_code_var, state="readonly").grid(row=4, column=0, sticky="ew", pady=(8, 0))
+            pin_row = ui.Frame(host_controls, style="Surface.TFrame")
+            pin_row.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+            pin_row.columnconfigure(0, weight=1)
+            self.network_pairing_pin_label = ui.Label(pin_row, text="One-time code: {code}", style="CardHint.TLabel")
+            self.network_pairing_pin_label.grid(row=0, column=0, sticky="w")
+            ui.Button(pin_row, text="Copy invite", command=self.copy_network_code).grid(row=0, column=1, sticky="e")
+            render_actions = ui.Frame(host_controls, style="Surface.TFrame")
+            render_actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+            render_actions.columnconfigure(0, weight=1)
+            ui.Button(render_actions, text="Render on group", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew")
+            ui.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, padx=(7, 0))
+
+            join_controls = ui.Frame(group_card, style="Surface.TFrame")
+            join_controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+            join_controls.columnconfigure(0, weight=1)
+            self.network_worker_card = join_controls
+            self.lan_controller_combo = ui.Combobox(join_controls, textvariable=self.lan_controller_var, state="readonly")
+            self.lan_controller_combo.grid(row=0, column=0, sticky="ew")
+            ui.Button(join_controls, text="Refresh", command=self.refresh_lan_controllers).grid(row=0, column=1, padx=(7, 0))
+            ui.Entry(join_controls, textvariable=self.network_pairing_input_var).grid(row=1, column=0, sticky="ew", pady=(7, 0))
+            ui.Label(join_controls, text="Code only for protected groups", style="CardHint.TLabel").grid(row=2, column=0, sticky="w", pady=(3, 0))
+            join_actions = ui.Frame(join_controls, style="Surface.TFrame")
+            join_actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            join_actions.columnconfigure(0, weight=1)
+            ui.Button(join_actions, text="Connect", style="Primary.TButton", command=self.connect_selected_lan_controller).grid(row=0, column=0, sticky="ew")
+            ui.Button(join_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=1, padx=(7, 0))
+
+            devices = self.make_card(column, ui, row=1, column=0, sticky="nsew", pady=(12, 0))
+            devices.columnconfigure(0, weight=1)
+            devices.rowconfigure(4, weight=1)
+            device_head = ui.Frame(devices, style="Surface.TFrame")
+            device_head.grid(row=0, column=0, sticky="ew")
+            device_head.columnconfigure(0, weight=1)
+            ui.Label(device_head, text="Devices", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(device_head, text="Select to configure", style="CardHint.TLabel").grid(row=0, column=1, sticky="e")
+            ui.Progressbar(devices, variable=self.network_progress_var, maximum=100, mode="determinate", style="Modern.Horizontal.TProgressbar").grid(row=1, column=0, sticky="ew", pady=(10, 0))
+            progress_text = ui.Frame(devices, style="Surface.TFrame")
+            progress_text.grid(row=2, column=0, sticky="ew", pady=(4, 8))
+            progress_text.columnconfigure(0, weight=1)
+            ui.Label(progress_text, textvariable=self.network_progress_text_var, style="CardHint.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(progress_text, textvariable=self.network_eta_var, style="CardHint.TLabel").grid(row=0, column=1, sticky="e")
+            columns = ("name", "state", "hardware", "current", "done", "average", "samples", "range")
+            self.network_tree = ui.Treeview(
+                devices,
+                columns=columns,
+                displaycolumns=("name", "state", "current", "average"),
+                show="headings",
+                style="Queue.Treeview",
+                selectmode="browse",
+                height=11,
+            )
+            for column_name, heading, width in (
+                ("name", "Device", 130),
+                ("state", "Status", 70),
+                ("current", "Frames", 65),
+                ("average", "Average", 70),
+            ):
+                self.register_heading(self.network_tree, column_name, heading)
+                self.network_tree.column(column_name, width=width, minwidth=55, stretch=column_name == "name", anchor="w" if column_name == "name" else "center")
+            self.network_tree.grid(row=4, column=0, sticky="nsew")
+            self.network_tree.bind("<<TreeviewSelect>>", self.on_network_device_selected)
+            ui.Label(devices, textvariable=self.network_status_var, style="CardHint.TLabel", wraplength=340).grid(row=5, column=0, sticky="w", pady=(8, 0))
+
+        def apply_render_device_mode(self, _event=None) -> None:
+            mode = self.render_device_mode_var.get().strip().upper()
+            has_gpu = bool(self.local_capabilities.gpus) and not all(
+                "no gpu" in gpu.casefold() for gpu in self.local_capabilities.gpus
+            )
+            if mode == "CPU":
+                use_cpu, use_gpu = True, False
+            elif mode == "GPU":
+                use_cpu, use_gpu = False, True
+            elif mode == "CPU_GPU":
+                use_cpu, use_gpu = True, True
+            else:
+                mode = "AUTO"
+                use_cpu, use_gpu = (False, True) if has_gpu else (True, False)
+            self.render_device_mode_var.set(mode)
+            self.use_cpu_var.set(use_cpu)
+            self.use_gpu_var.set(use_gpu)
+            self.schedule_config_save()
+
+        def create_new_render_group(self) -> None:
+            if self.network_controller is not None:
+                messagebox.showinfo(self.tr("Render group"), self.tr("Stop the current group before creating another one."))
+                return
+            name = simpledialog.askstring(
+                self.tr("New group"),
+                self.tr("Group name"),
+                parent=self.root,
+            )
+            if not name or not name.strip():
+                return
+            group = self.group_registry.create_group(name.strip(), self.network_group_security_var.get())
+            group.register_device(
+                self.group_registry.identity.device_id,
+                platform.node() or "This PC",
+                identity_fingerprint=self.group_registry.identity.fingerprint,
+                capabilities=self.local_capabilities,
+                role="coordinator",
+            )
+            self.network_controller_id = group.group_id
+            self.network_group_name_var.set(group.name)
+            self.network_group_security_var.set(group.security_mode)
+            self.network_allow_failover_var.set(group.allow_failover)
+            self.network_role_var.set("host")
+            self.update_group_security_label()
+            self.refresh_saved_group_selector()
+            self.update_network_role_view()
+            self.group_registry.save(GROUPS_PATH)
+            self.save_current_config()
+            self.set_localized(self.network_status_var, "Group created. Start it to accept devices.")
+
+        def refresh_saved_group_selector(self) -> None:
+            labels = {
+                f"{group.name} · {group.group_id[:6]}": group
+                for group in self.group_registry.groups.values()
+            }
+            self.saved_group_labels = labels
+            if hasattr(self, "network_group_selector"):
+                self.network_group_selector.configure(values=tuple(labels))
+            active = self.group_registry.active
+            selected = next((label for label, group in labels.items() if active and group.group_id == active.group_id), "")
+            self.network_group_selector_var.set(selected)
+
+        def switch_saved_render_group(self, _event=None) -> None:
+            group = self.saved_group_labels.get(self.network_group_selector_var.get())
+            if group is None or group.group_id == self.group_registry.active_group_id:
+                return
+            if self.network_controller is not None or self.network_worker is not None:
+                messagebox.showinfo(self.tr("Render group"), self.tr("Disconnect before switching render groups."))
+                self.refresh_saved_group_selector()
+                return
+            self.group_registry.active_group_id = group.group_id
+            self.network_controller_id = group.group_id
+            self.network_group_name_var.set(group.name)
+            self.network_group_security_var.set(group.security_mode)
+            self.network_allow_failover_var.set(group.allow_failover)
+            self.network_advertise_lan_var.set(group.visible_on_lan)
+            self.update_group_security_label()
+            self.group_registry.save(GROUPS_PATH)
+            self.save_current_config()
+            self.set_localized(self.network_status_var, "Selected group: {group}", group=group.name)
+
+        def apply_group_security(self, _event=None) -> None:
+            mode = self.network_group_security_var.get().strip().lower()
+            if mode not in {"open", "code"}:
+                mode = "code"
+                self.network_group_security_var.set(mode)
+            self.network_require_pairing_var.set(mode != "open")
+            self.apply_lan_visibility_settings()
+
+        def open_settings_window(self) -> None:
+            existing = getattr(self, "settings_window", None)
+            if existing is not None:
+                try:
+                    existing.lift()
+                    existing.focus_force()
+                    return
+                except tk.TclError:
+                    self.settings_window = None
+            dialog = tk.Toplevel(self.root)
+            self.settings_window = dialog
+            dialog.title(self.tr("Settings"))
+            dialog.geometry("1080x760")
+            dialog.minsize(900, 620)
+            dialog.configure(background=self.colors["bg"])
+            dialog.transient(self.root)
+            ui = GlassWidgetFactory(ttk, self.colors, translator=self.tr, register=self.register_localizable_widget)
+            shell = ui.Frame(dialog, style="App.TFrame", padding=18)
+            shell.pack(fill="both", expand=True)
+            shell.columnconfigure(0, weight=1)
+            shell.rowconfigure(1, weight=1)
+            title_row = ui.Frame(shell, style="Top.TFrame")
+            title_row.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+            title_row.columnconfigure(0, weight=1)
+            ui.Label(title_row, text="Settings", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Button(title_row, text="Close", command=dialog.destroy).grid(row=0, column=1, sticky="e")
+            canvas = tk.Canvas(shell, background=self.colors["bg"], borderwidth=0, highlightthickness=0, yscrollincrement=26)
+            scrollbar = ui.Scrollbar(shell, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.grid(row=1, column=0, sticky="nsew")
+            scrollbar.grid(row=1, column=1, sticky="ns", padx=(7, 0))
+            content = ui.Frame(canvas, style="App.TFrame")
+            window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+            def sync(_event=None) -> None:
+                canvas.itemconfigure(window_id, width=max(1, canvas.winfo_width()))
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            content.bind("<Configure>", sync, add="+")
+            canvas.bind("<Configure>", sync, add="+")
+            canvas.bind("<MouseWheel>", lambda event: canvas.yview_scroll(-1 if event.delta > 0 else 1, "units"))
+            self.build_settings_tab(content, ui)
+
+            def close() -> None:
+                self.settings_window = None
+                dialog.destroy()
+
+            dialog.protocol("WM_DELETE_WINDOW", close)
+
+        def open_connection_settings(self) -> None:
+            dialog = tk.Toplevel(self.root)
+            dialog.title(self.tr("Connection settings"))
+            dialog.geometry("720x690")
+            dialog.resizable(False, False)
+            dialog.configure(background=self.colors["bg"])
+            dialog.transient(self.root)
+            ui = GlassWidgetFactory(ttk, self.colors, translator=self.tr, register=self.register_localizable_widget)
+            shell = GlassCard(
+                dialog,
+                palette=self.colors,
+                padding=22,
+                radius=26,
+                backdrop=self.colors["bg"],
+                effects_enabled=False,
+            )
+            shell.pack(fill="both", expand=True, padx=20, pady=20)
+            card = shell.content
+            card.columnconfigure(1, weight=1)
+            ui.Label(card, text="Connection", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+            ui.Label(
+                card,
+                text="LAN is always available. SSH is used as the saved route between different networks.",
+                style="CardHint.TLabel",
+                wraplength=620,
+                justify="left",
+            ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 14))
+            ui.Label(card, text="Transport", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=5)
+            self.network_transport_combo = ui.Combobox(
+                card,
+                textvariable=self.network_transport_var,
+                values=self.localized_network_transport_labels(),
+                state="readonly",
+            )
+            self.network_transport_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=5)
+            self.network_transport_combo.bind("<<ComboboxSelected>>", self.change_network_transport)
+            for row, (label, variable) in enumerate(
+                (
+                    ("SSH host", self.ssh_host_var),
+                    ("SSH port", self.ssh_port_var),
+                    ("SSH user", self.ssh_user_var),
+                ),
+                start=3,
+            ):
+                ui.Label(card, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=5)
+                ui.Entry(card, textvariable=variable).grid(row=row, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=5)
+            ui.Label(card, text="SSH key", style="Field.TLabel").grid(row=6, column=0, sticky="w", pady=5)
+            ui.Entry(card, textvariable=self.ssh_identity_var).grid(row=6, column=1, sticky="ew", padx=(12, 8), pady=5)
+            ui.Button(card, text="Browse", command=self.browse_ssh_identity).grid(row=6, column=2, pady=5)
+            ui.Label(card, textvariable=self.openssh_status_var, style="CardHint.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            ui.Button(card, text="Install OpenSSH", command=self.install_openssh).grid(row=7, column=2, sticky="e", pady=(10, 0))
+            ui.Label(card, text="Saved invitation", style="Field.TLabel").grid(row=8, column=0, sticky="w", pady=(16, 5))
+            ui.Entry(card, textvariable=self.network_join_code_var).grid(row=9, column=0, columnspan=3, sticky="ew")
+            buttons = ui.Frame(card, style="Surface.TFrame")
+            buttons.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+            buttons.columnconfigure(0, weight=1)
+            ui.Button(buttons, text="Save", style="Primary.TButton", command=lambda: (self.change_network_transport(), self.save_current_config(), dialog.destroy())).grid(row=0, column=0, sticky="ew")
+            ui.Button(buttons, text="Connect by invitation", command=lambda: (dialog.destroy(), self.start_network_worker())).grid(row=0, column=1, padx=(8, 0))
+            ui.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=2, padx=(8, 0))
 
         def build_queue_tab(self, parent, ttk_module) -> None:
             queue_card = self.make_card(parent, ttk_module, row=0, column=0, sticky="nsew")
@@ -2841,6 +3483,12 @@ def run_gui(args: argparse.Namespace) -> int:
             path = filedialog.askopenfilename(title="Choose .blend file", filetypes=[("Blender files", "*.blend"), ("All files", "*.*")])
             if path:
                 self.blend_var.set(path)
+                existing = self.render_queue.find_by_source(path)
+                if existing is not None:
+                    self.render_queue.set_active(existing.job_id)
+                    self.sync_form_from_queue_job(existing, include_paths=False)
+                    self.save_render_queue()
+                    self.refresh_queue_tree(existing.job_id)
                 self.save_current_config()
 
         def choose_frames(self) -> None:
@@ -2937,6 +3585,50 @@ def run_gui(args: argparse.Namespace) -> int:
                 else:
                     widget.grid_remove()
 
+        def initialize_active_project(self) -> None:
+            """Restore the queue's canonical project into every workspace control."""
+            active = self.render_queue.active
+            if active is None:
+                blend_text = self.blend_var.get().strip().strip('"')
+                blend = Path(blend_text) if blend_text else None
+                if blend is not None and blend.exists():
+                    start: int | None = None
+                    end: int | None = None
+                    if not self.use_scene_range_var.get():
+                        try:
+                            start = int(self.start_frame_var.get()) if self.start_frame_var.get().strip() else None
+                            end = int(self.end_frame_var.get()) if self.end_frame_var.get().strip() else None
+                        except ValueError:
+                            start = end = None
+                    try:
+                        active = RenderJob(
+                            blend_path=str(blend),
+                            output_path=self.frames_var.get().strip().strip('"'),
+                            use_scene_output=self.use_scene_output_var.get(),
+                            use_scene_range=self.use_scene_range_var.get(),
+                            start_frame=start,
+                            end_frame=end,
+                            resolution_percent=self.parse_positive_int(self.resolution_percent_var.get(), 100, 1, 100),
+                            render_mode=self.render_mode_var.get(),
+                            compose_video=self.compose_video_var.get(),
+                            video_format=self.video_format_var.get(),
+                            fps=self.parse_positive_float(self.video_fps_var.get(), 24.0, 1.0, 240.0),
+                            chunk_mode=self.chunk_mode_var.get(),
+                            chunk_size=self.parse_positive_int(self.chunk_size_var.get(), 10, 1, 1000),
+                            render_device_mode=self.render_device_mode_var.get(),
+                            compute_backend=self.compute_backend_var.get(),
+                        )
+                        active.refresh_revision()
+                        self.render_queue.add(active, activate=True)
+                        self.save_render_queue()
+                    except ValueError:
+                        active = None
+            if active is not None:
+                self.sync_form_from_queue_job(active)
+                self.refresh_queue_tree(active.job_id)
+            else:
+                self.set_localized(self.active_project_var, "No active project")
+
         def save_render_queue(self) -> None:
             try:
                 self.render_queue.save(QUEUE_PATH)
@@ -2956,18 +3648,19 @@ def run_gui(args: argparse.Namespace) -> int:
                 "paused": "Paused",
             }
             for index, job in enumerate(self.render_queue.jobs, start=1):
+                active_marker = "●" if job.job_id == self.render_queue.active_job_id else str(index)
                 self.queue_tree.insert(
                     "",
                     "end",
                     iid=job.job_id,
                     values=(
-                        index,
+                        active_marker,
                         job.project_name,
                         job.range_label,
                         "Video" if job.compose_video else "Frames",
                         format_duration(job.estimated_seconds) if job.estimated_seconds is not None else "—",
                         job.output_label,
-                        status_labels.get(job.status, job.status.title()),
+                        self.tr(status_labels.get(job.status, job.status.title())),
                     ),
                 )
             pending_count = len(self.render_queue.pending())
@@ -2981,9 +3674,49 @@ def run_gui(args: argparse.Namespace) -> int:
                 )
             else:
                 self.set_localized(self.queue_summary_var, "Queue is empty")
+            active = self.render_queue.active
+            if active is not None:
+                self.set_raw(self.active_project_var, active.project_name)
+            else:
+                self.set_localized(self.active_project_var, "No active project")
+            selected_job_id = selected_job_id or self.render_queue.active_job_id
             if selected_job_id and self.queue_tree.exists(selected_job_id):
                 self.queue_tree.selection_set(selected_job_id)
                 self.queue_tree.focus(selected_job_id)
+
+        def sync_form_from_queue_job(self, job: RenderJob, include_paths: bool = True) -> None:
+            """Make every workspace panel point at the queue's active project."""
+            if include_paths:
+                self.blend_var.set(job.blend_path)
+                self.frames_var.set(job.output_path)
+            self.use_scene_output_var.set(job.use_scene_output)
+            self.use_scene_range_var.set(job.use_scene_range)
+            self.start_frame_var.set("" if job.start_frame is None else str(job.start_frame))
+            self.end_frame_var.set("" if job.end_frame is None else str(job.end_frame))
+            self.resolution_percent_var.set(str(job.resolution_percent))
+            self.render_mode_var.set(job.render_mode)
+            self.compose_video_var.set(job.compose_video)
+            self.video_format_var.set(job.video_format)
+            self.video_fps_var.set(str(job.fps))
+            self.chunk_mode_var.set(job.chunk_mode)
+            self.chunk_size_var.set(str(job.chunk_size))
+            self.render_device_mode_var.set(job.render_device_mode)
+            self.compute_backend_var.set(job.compute_backend)
+            self.set_raw(self.active_project_var, job.project_name)
+            self.update_manual_controls()
+            self.update_video_controls()
+
+        def on_queue_project_selected(self, _event=None) -> None:
+            job_id = self.selected_queue_job_id()
+            if not job_id:
+                return
+            try:
+                job = self.render_queue.set_active(job_id)
+            except KeyError:
+                return
+            self.sync_form_from_queue_job(job)
+            self.save_render_queue()
+            self.save_current_config()
 
         def queue_job_from_current(self, blend_path: Path | None = None) -> RenderJob | None:
             blend_text = str(blend_path or self.blend_var.get().strip().strip('"'))
@@ -3012,7 +3745,12 @@ def run_gui(args: argparse.Namespace) -> int:
                 compose_video=self.compose_video_var.get(),
                 video_format=self.video_format_var.get(),
                 fps=fps,
+                chunk_mode=self.chunk_mode_var.get(),
+                chunk_size=self.parse_positive_int(self.chunk_size_var.get(), 10, 1, 1000),
+                render_device_mode=self.render_device_mode_var.get(),
+                compute_backend=self.compute_backend_var.get(),
             )
+            job.refresh_revision()
             estimate_start = start_frame if start_frame is not None else 1
             estimate_end = end_frame if end_frame is not None else 250
             workers = 1 + len(self.network_controller.workers) if self.network_controller else 1
@@ -3027,7 +3765,7 @@ def run_gui(args: argparse.Namespace) -> int:
             job = self.queue_job_from_current()
             if job is None:
                 return
-            self.render_queue.add(job)
+            job = self.render_queue.add_or_update(job, activate=True)
             self.save_render_queue()
             self.refresh_queue_tree(job.job_id)
             self.log(f"[WATCHDOG] Added to queue: {job.project_name}")
@@ -3044,8 +3782,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 job = self.queue_job_from_current(Path(path))
                 if job is None:
                     break
-                self.render_queue.add(job)
-                last_job = job
+                last_job = self.render_queue.add_or_update(job, activate=True)
             if last_job:
                 self.save_render_queue()
                 self.refresh_queue_tree(last_job.job_id)
@@ -3125,6 +3862,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.video_format_var,
                 self.video_fps_var,
                 self.smart_queue_var,
+                self.chunk_mode_var,
+                self.chunk_size_var,
+                self.render_device_mode_var,
+                self.compute_backend_var,
                 self.update_manifest_url_var,
                 self.check_updates_on_start_var,
                 self.auto_install_updates_var,
@@ -3139,6 +3880,9 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.network_use_local_var,
                 self.network_advertise_lan_var,
                 self.network_require_pairing_var,
+                self.network_group_name_var,
+                self.network_group_security_var,
+                self.network_allow_failover_var,
                 self.controller_name_var,
                 self.worker_name_var,
                 self.network_join_code_var,
@@ -3162,6 +3906,19 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def save_current_config(self) -> None:
             self.config_save_after_id = None
+            active_group = self.group_registry.active
+            if active_group is not None:
+                active_group.name = self.network_group_name_var.get().strip()[:80] or active_group.name
+                security_mode = self.network_group_security_var.get().strip().lower()
+                active_group.security_mode = security_mode if security_mode in {"open", "approval", "code"} else "approval"
+                active_group.visible_on_lan = self.network_advertise_lan_var.get()
+                active_group.allow_failover = self.network_allow_failover_var.get()
+                active_group.ssh_endpoint = self.ssh_host_var.get().strip()
+                active_group.updated_at = time.time()
+                try:
+                    self.group_registry.save(GROUPS_PATH)
+                except OSError as error:
+                    self.log_queue.put(f"[NETWORK] Could not save render groups: {error}")
             save_config(
                 {
                     "blender": self.blender_var.get().strip(),
@@ -3189,6 +3946,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     "video_format": self.video_format_var.get().strip(),
                     "video_fps": self.video_fps_var.get().strip(),
                     "smart_queue": "1" if self.smart_queue_var.get() else "0",
+                    "chunk_mode": self.chunk_mode_var.get().strip(),
+                    "chunk_size": self.chunk_size_var.get().strip(),
+                    "render_device_mode": self.render_device_mode_var.get().strip(),
+                    "compute_backend": self.compute_backend_var.get().strip(),
                     "update_manifest_url": self.update_manifest_url_var.get().strip(),
                     "check_updates_on_start": "1" if self.check_updates_on_start_var.get() else "0",
                     "auto_install_updates": "1" if self.auto_install_updates_var.get() else "0",
@@ -3205,6 +3966,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     "network_advertise_lan": "1" if self.network_advertise_lan_var.get() else "0",
                     "network_require_pairing": "1" if self.network_require_pairing_var.get() else "0",
                     "network_controller_id": self.network_controller_id,
+                    "network_group_name": self.network_group_name_var.get().strip(),
                     "network_trusted_devices": encode_trusted_network_devices(self.trusted_network_devices),
                     "network_saved_connections": json.dumps(self.saved_lan_connections, ensure_ascii=False, separators=(",", ":")),
                     "network_controller_name": self.controller_name_var.get().strip(),
@@ -3246,8 +4008,10 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.update_manifest_url_var.set(update_source)
             self.save_current_config()
             self.set_localized(self.update_status_var, "Checking for updates...")
-            self.check_update_button.configure(state="disabled")
-            self.install_update_button.configure(state="disabled")
+            if hasattr(self, "check_update_button"):
+                self.check_update_button.configure(state="disabled")
+            if hasattr(self, "install_update_button"):
+                self.install_update_button.configure(state="disabled")
             threading.Thread(target=self.update_check_worker, args=(update_source,), daemon=True).start()
 
         def update_check_worker(self, update_source: str) -> None:
@@ -3393,6 +4157,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 "samples": samples,
                 "tile_size": tile_size,
                 "resolution_percent": resolution,
+                "compute_backend": self.compute_backend_var.get().strip().upper() or "AUTO",
             }
 
         def validate_paths(self) -> tuple[Path, Path, Path] | None:
@@ -3624,19 +4389,37 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.lan_advertiser.stop()
             self.lan_advertiser = None
 
-        def _start_lan_advertiser(self) -> None:
-            self._stop_lan_advertiser()
+        def current_lan_announcement(self) -> DiscoveredController | None:
             controller = self.network_controller
-            if not controller or controller.transport != "lan" or not self.network_advertise_lan_var.get():
-                return
-            announcement = DiscoveredController(
+            if controller is None:
+                return None
+            active_group = self.group_registry.active
+            group_name = active_group.name if active_group else controller.controller_name
+            security_mode = active_group.security_mode if active_group else ("code" if controller.require_pairing_code else "open")
+            return DiscoveredController(
                 self.network_controller_id,
                 controller.controller_name,
                 controller.advertised_host,
                 controller.port,
                 controller.require_pairing_code,
                 APP_VERSION,
+                group_id=active_group.group_id if active_group else self.network_controller_id,
+                group_name=group_name,
+                coordinator_device_id=self.group_registry.identity.device_id,
+                device_count=1 + len([worker for worker in controller.workers.values() if not worker.disabled]),
+                security_mode=security_mode,
+                joinable=True,
+                coordinator_online=True,
             )
+
+        def _start_lan_advertiser(self) -> None:
+            self._stop_lan_advertiser()
+            controller = self.network_controller
+            if not controller or not self.network_advertise_lan_var.get():
+                return
+            announcement = self.current_lan_announcement()
+            if announcement is None:
+                return
             try:
                 self.lan_advertiser = LanDiscoveryAdvertiser(announcement)
                 self.lan_advertiser.start()
@@ -3657,6 +4440,8 @@ def run_gui(args: argparse.Namespace) -> int:
             if self.lan_discovery_running:
                 return
             self.lan_discovery_running = True
+            if hasattr(self, "connection_status_icon") and not self.network_controller and not self.network_worker:
+                self.connection_status_icon.set_state("searching")
             self.last_lan_discovery_at = time.monotonic()
 
             def scan() -> None:
@@ -3670,11 +4455,15 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def _apply_lan_controllers(self, controllers: list[DiscoveredController]) -> None:
             self.lan_discovery_running = False
-            self.discovered_controllers = {item.controller_id: item for item in controllers}
+            if hasattr(self, "connection_status_icon") and not self.network_controller and not self.network_worker:
+                self.connection_status_icon.set_state("searching" if controllers else "offline")
+            self.discovered_controllers = {item.effective_group_id: item for item in controllers}
             labels: dict[str, DiscoveredController] = {}
             for item in controllers:
-                lock = self.tr("Code required") if item.requires_code and item.controller_id not in self.saved_lan_connections else self.tr("Ready")
-                labels[f"{item.name} · {item.host}:{item.port} · {lock}"] = item
+                remembered = item.effective_group_id in self.saved_lan_connections
+                lock = self.tr("Code required") if item.requires_code and not remembered else self.tr("Ready")
+                online = lock if item.coordinator_online else self.tr("Offline")
+                labels[f"{item.effective_group_name} · {item.device_count} devices · {online}"] = item
             self.discovered_controller_labels = labels
             if hasattr(self, "lan_controller_combo"):
                 self.lan_controller_combo.configure(values=tuple(labels))
@@ -3687,7 +4476,11 @@ def run_gui(args: argparse.Namespace) -> int:
             if controller is None:
                 messagebox.showinfo(self.tr("Local network"), self.tr("No main PC was found. Refresh the list or use an advanced connection code."))
                 return
-            saved = self.saved_lan_connections.get(controller.controller_id, "")
+            if not controller.joinable or not controller.coordinator_online:
+                messagebox.showinfo(self.tr("Local network"), self.tr("This group is remembered, but its coordinator is currently offline."))
+                return
+            group_id = controller.effective_group_id
+            saved = self.saved_lan_connections.get(group_id, "")
             if saved:
                 try:
                     old = PairingCode.decode(saved)
@@ -3696,7 +4489,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.start_network_worker()
                     return
                 except ValueError:
-                    self.saved_lan_connections.pop(controller.controller_id, None)
+                    self.saved_lan_connections.pop(group_id, None)
             pin = self.network_pairing_input_var.get().strip()
             if controller.requires_code and not pin:
                 messagebox.showinfo(self.tr("One-time code"), self.tr("Enter the one-time code shown on the main PC."))
@@ -3712,7 +4505,34 @@ def run_gui(args: argparse.Namespace) -> int:
             threading.Thread(target=pair, name="lan-pairing", daemon=True).start()
 
         def _finish_lan_pairing(self, controller: DiscoveredController, code: str) -> None:
-            self.saved_lan_connections[controller.controller_id] = code
+            group_id = controller.effective_group_id
+            self.saved_lan_connections[group_id] = code
+            remembered = self.group_registry.groups.get(group_id)
+            if remembered is None:
+                remembered = RenderGroup(
+                    name=controller.effective_group_name,
+                    owner_device_id=controller.coordinator_device_id or group_id,
+                    group_id=group_id,
+                    security_mode=controller.security_mode,
+                    coordinator_device_id=controller.coordinator_device_id,
+                )
+            else:
+                remembered.name = controller.effective_group_name
+                remembered.security_mode = controller.security_mode or remembered.security_mode
+                remembered.coordinator_device_id = controller.coordinator_device_id or remembered.coordinator_device_id
+            remembered.register_device(
+                self.group_registry.identity.device_id,
+                self.worker_name_var.get().strip() or platform.node(),
+                identity_fingerprint=self.group_registry.identity.fingerprint,
+                capabilities=self.local_capabilities,
+                address=controller.host,
+                role="worker",
+            )
+            self.group_registry.remember_group(remembered)
+            self.group_registry.active_group_id = group_id
+            self.network_controller_id = group_id
+            self.network_group_name_var.set(remembered.name)
+            self.refresh_saved_group_selector()
             self.network_join_code_var.set(code)
             self.network_pairing_input_var.set("")
             self.save_current_config()
@@ -3752,7 +4572,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def start_network_controller(self) -> None:
             if self.network_controller is not None:
-                self.network_code_var.set(self.network_controller.pairing_code)
+                self.network_code_var.set(self.network_controller.invitation_link)
                 return
             try:
                 advertised_host = None
@@ -3770,13 +4590,24 @@ def run_gui(args: argparse.Namespace) -> int:
                     ssh_port = int(self.ssh_port_var.get().strip() or "22")
                     if not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535:
                         raise ValueError(self.tr("Enter a valid SSH address, port, and user."))
-                    bind_host = "127.0.0.1"
-                    advertised_host = "127.0.0.1"
+                    bind_host = "0.0.0.0"
+                    advertised_host = None
                 access = resolve_service_access(
                     self.access_mode,
                     self.access_key_var.get(),
                     "network",
                 )
+                active_group = self.group_registry.active
+                if active_group is not None:
+                    active_group.register_device(
+                        self.group_registry.identity.device_id,
+                        self.controller_name_var.get().strip() or platform.node(),
+                        identity_fingerprint=self.group_registry.identity.fingerprint,
+                        capabilities=self.local_capabilities,
+                        role="coordinator",
+                    )
+                    active_group.coordinator_device_id = self.group_registry.identity.device_id
+                    self.group_registry.save(GROUPS_PATH)
                 self.network_controller = RenderCoordinator(
                     bind_host=bind_host,
                     port=access.port,
@@ -3793,9 +4624,11 @@ def run_gui(args: argparse.Namespace) -> int:
                     controller_hardware=f"{self.cpu_name}; {'; '.join(self.gpu_names)}",
                     on_event=lambda message: self.log_queue.put(message),
                     on_frame=self.on_network_frame,
+                    group_id=self.network_controller_id,
+                    controller_device_id=self.group_registry.identity.device_id,
                 )
                 code = self.network_controller.start()
-                self.network_code_var.set(code)
+                self.network_code_var.set(self.network_controller.invitation_link)
                 self.network_join_code_var.set(code)
                 self.network_pairing_pin_var.set(self.network_controller.pairing_pin)
                 self.update_pairing_pin_label()
@@ -3817,6 +4650,16 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.network_controller.plan.stop()
                 self.network_controller.stop()
             self.network_controller = None
+            active_group = self.group_registry.active
+            if active_group is not None:
+                local_member = active_group.members.get(self.group_registry.identity.device_id)
+                if local_member is not None:
+                    local_member.last_seen = 0.0
+                active_group.elect_coordinator()
+                try:
+                    self.group_registry.save(GROUPS_PATH)
+                except OSError:
+                    pass
             self.network_code_var.set("")
             self.network_pairing_pin_var.set("—")
             self.update_pairing_pin_label()
@@ -3852,6 +4695,14 @@ def run_gui(args: argparse.Namespace) -> int:
                 )
                 self.start_network_worker(confirm=False, name_override=self.controller_name_var.get().strip())
             blender, blend, manual_output = paths
+            active_job = self.queue_job_from_current(blend)
+            if active_job is None:
+                return
+            active_job = self.render_queue.add_or_update(active_job, activate=True)
+            active_job.status = "running"
+            self.active_queue_job_id = active_job.job_id
+            self.save_render_queue()
+            self.refresh_queue_tree(active_job.job_id)
             settings = query_scene_settings(blender, blend, log=lambda message: self.log(message)) or {}
             output = (
                 output_folder_from_scene_path(str(settings.get("output_path") or ""), blend)
@@ -3883,7 +4734,7 @@ def run_gui(args: argparse.Namespace) -> int:
             controller = self.network_controller
             threading.Thread(
                 target=self.prepare_network_plan_worker,
-                args=(controller, blend, output, start, end, settings, completed_frames),
+                args=(controller, blend, output, start, end, settings, completed_frames, active_job),
                 daemon=True,
             ).start()
 
@@ -3896,6 +4747,7 @@ def run_gui(args: argparse.Namespace) -> int:
             end: int,
             settings: dict[str, object],
             completed_frames: set[int],
+            active_job: RenderJob,
         ) -> None:
             try:
                 legacy_cache = app_config_dir() / "network_projects"
@@ -3904,7 +4756,17 @@ def run_gui(args: argparse.Namespace) -> int:
                     raise FileNotFoundError(f"Blend file not found: {blend}")
                 if self.network_controller is not controller:
                     return
-                controller.start_plan(blend, output, start, end, completed_frames)
+                controller.start_plan(
+                    blend,
+                    output,
+                    start,
+                    end,
+                    completed_frames,
+                    chunk_mode=active_job.chunk_mode,
+                    chunk_size=active_job.chunk_size,
+                    project_id=active_job.project_id,
+                    source_fingerprint=active_job.source_fingerprint,
+                )
                 self.network_session = RenderSession(str(blend), str(output), start, end, mode="network", settings=settings)
                 self.network_history_saved = False
                 self.log_queue.put(("__NETWORK_STARTED__", start, end, len(completed_frames)))
@@ -3994,6 +4856,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     on_event=lambda message: self.log_queue.put(message),
                     use_cpu=self.use_cpu_var.get(),
                     use_gpu=self.use_gpu_var.get(),
+                    device_id=self.group_registry.identity.device_id,
+                    identity_fingerprint=self.group_registry.identity.fingerprint,
+                    capabilities=self.local_capabilities,
+                    compute_backend=self.compute_backend_var.get(),
                 )
                 worker = self.network_worker
                 threading.Thread(target=self.run_network_worker, args=(worker,), daemon=True).start()
@@ -4045,8 +4911,17 @@ def run_gui(args: argparse.Namespace) -> int:
                 start = int(self.worker_range_start_var.get()) if self.worker_range_start_var.get().strip() else None
                 end = int(self.worker_range_end_var.get()) if self.worker_range_end_var.get().strip() else None
                 samples = int(self.worker_samples_var.get()) if self.worker_samples_var.get().strip() else None
+                backend = self.worker_backend_var.get().strip() or "AUTO"
+                chunk_size = int(self.worker_chunk_size_var.get()) if self.worker_chunk_size_var.get().strip() else None
                 worker_id = self.network_device_worker_ids.get(str(selection[0]), "")
-                if not worker_id or not self.network_controller.set_worker_settings(worker_id, start, end, samples):
+                if not worker_id or not self.network_controller.set_worker_settings(
+                    worker_id,
+                    start,
+                    end,
+                    samples,
+                    compute_backend=backend,
+                    chunk_size=chunk_size,
+                ):
                     messagebox.showerror(self.tr("Allocation"), self.tr("This device is not available for render settings."))
                     return
                 self.set_localized(self.network_status_var, "Device render settings applied")
@@ -4066,6 +4941,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.worker_range_start_var.set("" if device.get("frame_start") is None else str(device["frame_start"]))
             self.worker_range_end_var.set("" if device.get("frame_end") is None else str(device["frame_end"]))
             self.worker_samples_var.set("" if device.get("samples") is None else str(device["samples"]))
+            self.worker_backend_var.set(str(device.get("compute_backend") or "AUTO"))
+            self.worker_chunk_size_var.set("" if device.get("chunk_size") is None else str(device["chunk_size"]))
             item_id = str(selection[0])
             if self.network_controller and self.network_device_worker_ids.get(item_id):
                 self.root.after_idle(lambda selected_item=item_id: self.show_network_device_settings(selected_item))
@@ -4083,7 +4960,7 @@ def run_gui(args: argparse.Namespace) -> int:
             dialog = tk.Toplevel(self.root)
             self.network_device_dialog = dialog
             dialog.title(self.tr("Device settings"))
-            dialog.geometry("650x610")
+            dialog.geometry("650x700")
             dialog.resizable(False, False)
             dialog.configure(background=self.colors["bg"])
             dialog.transient(self.root)
@@ -4137,9 +5014,30 @@ def run_gui(args: argparse.Namespace) -> int:
             start_var = tk.StringVar(value="" if device.get("frame_start") is None else str(device["frame_start"]))
             end_var = tk.StringVar(value="" if device.get("frame_end") is None else str(device["frame_end"]))
             samples_var = tk.StringVar(value="" if device.get("samples") is None else str(device["samples"]))
+            backend_var = tk.StringVar(value=str(device.get("compute_backend") or "AUTO"))
+            chunk_size_var = tk.StringVar(value="" if device.get("chunk_size") is None else str(device["chunk_size"]))
 
             ui.Label(card, text="Render device", style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=(14, 5))
             ui.Combobox(card, textvariable=mode_var, values=("GPU + CPU", "GPU", "CPU"), state="readonly").grid(row=row, column=1, sticky="ew", padx=(14, 0), pady=(14, 5))
+            row += 1
+
+            capabilities = device.get("capabilities") if isinstance(device.get("capabilities"), dict) else {}
+            supported_backends = ["AUTO", *[str(value).upper() for value in capabilities.get("compute_backends", [])]]
+            ui.Label(card, text="Cycles backend", style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=5)
+            ui.Combobox(
+                card,
+                textvariable=backend_var,
+                values=tuple(dict.fromkeys(supported_backends)),
+                state="readonly",
+            ).grid(row=row, column=1, sticky="ew", padx=(14, 0), pady=5)
+            row += 1
+
+            ui.Label(card, text="Frames per assignment", style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=5)
+            ui.Combobox(
+                card,
+                textvariable=chunk_size_var,
+                values=("", "1", "5", "10", "20", "50"),
+            ).grid(row=row, column=1, sticky="ew", padx=(14, 0), pady=5)
             row += 1
 
             allocation = ui.Frame(card, style="Surface.TFrame")
@@ -4157,13 +5055,23 @@ def run_gui(args: argparse.Namespace) -> int:
                     start = None if automatic or not start_var.get().strip() else int(start_var.get())
                     end = None if automatic or not end_var.get().strip() else int(end_var.get())
                     samples = int(samples_var.get()) if samples_var.get().strip() else None
+                    chunk_size = int(chunk_size_var.get()) if chunk_size_var.get().strip() else None
                     mode = mode_var.get()
                     use_cpu = mode in {"CPU", "GPU + CPU"}
                     use_gpu = mode in {"GPU", "GPU + CPU"}
                     worker_id = self.network_device_worker_ids.get(item_id, "")
                     if not self.network_controller or not worker_id:
                         raise ValueError(self.tr("This device is not available for render settings."))
-                    if not self.network_controller.set_worker_settings(worker_id, start, end, samples, use_cpu, use_gpu):
+                    if not self.network_controller.set_worker_settings(
+                        worker_id,
+                        start,
+                        end,
+                        samples,
+                        use_cpu,
+                        use_gpu,
+                        compute_backend=backend_var.get(),
+                        chunk_size=chunk_size,
+                    ):
                         raise ValueError(self.tr("This device is not available for render settings."))
                     self.set_localized(self.network_status_var, "Device render settings applied")
                     self.refresh_network_state()
@@ -4248,10 +5156,23 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def refresh_network_state(self) -> None:
             controller = self.network_controller
+            if hasattr(self, "connection_status_icon"):
+                if controller:
+                    self.connection_status_icon.set_state("host")
+                elif self.network_worker:
+                    self.connection_status_icon.set_state("connected")
+                elif self.lan_discovery_running:
+                    self.connection_status_icon.set_state("searching")
+                else:
+                    self.connection_status_icon.set_state("offline")
             if controller:
                 if controller.require_pairing_code and time.time() > controller.pairing_pin_expires_at:
                     controller.rotate_pairing_pin()
                 self.network_pairing_pin_var.set(controller.pairing_pin)
+                if self.lan_advertiser:
+                    announcement = self.current_lan_announcement()
+                    if announcement is not None:
+                        self.lan_advertiser.update(announcement)
             self.update_pairing_pin_label()
             if self.network_role_var.get() == "connect" and time.monotonic() - self.last_lan_discovery_at >= 5:
                 self.refresh_lan_controllers()
@@ -4267,6 +5188,8 @@ def run_gui(args: argparse.Namespace) -> int:
                 plan_snapshot = snapshot.get("plan") if isinstance(snapshot, dict) else None
                 self.update_network_progress(plan_snapshot if isinstance(plan_snapshot, dict) else None)
                 devices = snapshot.get("devices") or snapshot.get("workers") or []
+                visible_device_ids: set[str] = set()
+                active_group = self.group_registry.active
                 if isinstance(devices, list):
                     for device in devices:
                         if not isinstance(device, dict):
@@ -4277,9 +5200,21 @@ def run_gui(args: argparse.Namespace) -> int:
                         name = str(device.get("name") or self.tr("Device"))
                         if device.get("is_controller"):
                             name = f"{name} · {self.tr('Main')}"
-                        item_id = str(device.get("worker_id") or name)
+                        device_id = str(device.get("device_id") or device.get("worker_id") or name)
+                        item_id = device_id
+                        visible_device_ids.add(device_id)
                         self.network_device_worker_ids[item_id] = str(device.get("settings_worker_id") or device.get("worker_id") or "")
                         self.network_device_rows[item_id] = device
+                        if active_group is not None:
+                            raw_capabilities = device.get("capabilities") if isinstance(device.get("capabilities"), dict) else {}
+                            active_group.register_device(
+                                device_id,
+                                str(device.get("name") or name),
+                                identity_fingerprint=str(device.get("identity_fingerprint") or ""),
+                                capabilities=DeviceCapabilities.from_dict(raw_capabilities),
+                                address=str((snapshot.get("controller") or {}).get("host") or "") if isinstance(snapshot.get("controller"), dict) else "",
+                                role="coordinator" if device.get("is_controller") else "worker",
+                            )
                         self.network_tree.insert(
                             "",
                             "end",
@@ -4288,15 +5223,48 @@ def run_gui(args: argparse.Namespace) -> int:
                                 name,
                                 self.tr("Online") if device.get("online", True) else self.tr("Offline"),
                                 str(device.get("hardware") or "—"),
-                                device.get("current_frame") or "—",
+                                (
+                                    f"{device['current_frames'][0]}–{device['current_frames'][-1]}"
+                                    if isinstance(device.get("current_frames"), list) and len(device["current_frames"]) > 1
+                                    else device.get("current_frame") or "—"
+                                ),
                                 int(device.get("completed_frames") or 0),
                                 format_duration(float(device.get("average_seconds") or 0.0)),
                                 device.get("samples") or self.tr("Scene"),
                                 allocation,
                             ),
                         )
+                if active_group is not None:
+                    for device_id, member in active_group.members.items():
+                        if device_id in visible_device_ids:
+                            continue
+                        remembered = {
+                            "device_id": device_id,
+                            "name": member.name,
+                            "hardware": "; ".join(filter(None, [member.capabilities.cpu, *member.capabilities.gpus])),
+                            "online": False,
+                            "capabilities": member.capabilities.to_dict(),
+                            "compute_backend": "AUTO",
+                        }
+                        self.network_device_rows[device_id] = remembered
+                        self.network_device_worker_ids[device_id] = ""
+                        self.network_tree.insert(
+                            "",
+                            "end",
+                            iid=device_id,
+                            values=(member.name, self.tr("Offline"), remembered["hardware"] or "—", "—", 0, "—", self.tr("Scene"), self.tr("Auto")),
+                        )
+                    if time.monotonic() - self.last_group_save_at >= 10:
+                        try:
+                            self.group_registry.save(GROUPS_PATH)
+                            self.last_group_save_at = time.monotonic()
+                        except OSError:
+                            pass
                 if controller:
-                    online = sum(time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS for worker in controller.workers.values())
+                    online = sum(
+                        not worker.disabled and time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS
+                        for worker in controller.workers.values()
+                    )
                     self.set_localized(
                         self.network_status_var,
                         "Controller active · {online}/{maximum} devices",
@@ -4304,7 +5272,7 @@ def run_gui(args: argparse.Namespace) -> int:
                         maximum=MAX_WORKERS,
                     )
                     if controller.plan:
-                        summary = controller.plan.summary()
+                        summary = controller.plan.summary(controller.workers)
                         corrupt_frames = summary.get("corrupt_frames") or []
                         if corrupt_frames and not summary["finished"]:
                             self.set_localized(
@@ -4335,6 +5303,13 @@ def run_gui(args: argparse.Namespace) -> int:
                             self.save_render_history()
                             self.refresh_history_views()
                             self.network_history_saved = True
+                            active_job = self.render_queue.active
+                            if active_job is not None and active_job.project_id == str(summary.get("project_id") or ""):
+                                active_job.status = "completed" if int(summary["failed"]) == 0 else "failed"
+                                active_job.error = "" if active_job.status == "completed" else "One or more network frames failed"
+                                self.active_queue_job_id = None
+                                self.save_render_queue()
+                                self.refresh_queue_tree(active_job.job_id)
                             self.set_localized(self.status_var, "Network complete")
                             detail = (
                                 "{completed} complete · {failed} failed · integrity verified"
@@ -4465,12 +5440,15 @@ def run_gui(args: argparse.Namespace) -> int:
             queue_text = ", ".join(f"{job.project_name}: {job.status}" for job in self.render_queue.jobs[:8])
             workers = 0
             if self.network_controller:
-                workers = sum(time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS for worker in self.network_controller.workers.values())
+                workers = sum(
+                    not worker.disabled and time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS
+                    for worker in self.network_controller.workers.values()
+                )
             current_frame = self.current_render_frame
             remaining_frames = 0
             average_seconds = self.render_average_seconds
             if self.network_controller and self.network_controller.plan:
-                summary = self.network_controller.plan.summary()
+                summary = self.network_controller.plan.summary(self.network_controller.workers)
                 remaining_frames = int(summary.get("remaining_frames") or 0)
                 running = [task.frame for task in self.network_controller.plan.tasks.values() if task.status == "running"]
                 current_frame = min(running) if running else current_frame
@@ -4492,7 +5470,8 @@ def run_gui(args: argparse.Namespace) -> int:
             self.mobile_state_cache = {
                 "device_name": self.controller_name_var.get().strip() or platform.node() or "Blender PC",
                 "version": APP_VERSION,
-                "project": Path(self.blend_var.get().strip().strip('"')).name or "Waiting for render",
+                "project": self.render_queue.active.project_name if self.render_queue.active else "Waiting for render",
+                "project_id": self.render_queue.active.project_id if self.render_queue.active else "",
                 "status": self.status_var.get(),
                 "detail": self.status_detail_var.get(),
                 "progress": float(self.progress_var.get()),
@@ -4558,6 +5537,16 @@ def run_gui(args: argparse.Namespace) -> int:
             if output_values is None:
                 return
             frames, output_override = output_values
+            active_job = self.queue_job_from_current(blend)
+            if active_job is None:
+                return
+            active_job = self.render_queue.add_or_update(active_job, activate=True)
+            active_job.status = "running"
+            active_job.attempts += 1
+            active_job.error = ""
+            self.active_queue_job_id = active_job.job_id
+            self.save_render_queue()
+            self.refresh_queue_tree(active_job.job_id)
             self.save_current_config()
             self.stop_event = threading.Event()
             self.pause_event = threading.Event()
@@ -4601,6 +5590,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     compose_after,
                     video_format,
                     video_fps,
+                    active_job.job_id,
                 ),
                 daemon=True,
             )
@@ -4621,6 +5611,7 @@ def run_gui(args: argparse.Namespace) -> int:
             compose_after: bool,
             video_format: str,
             video_fps: float,
+            active_job_id: str,
         ) -> None:
             session = RenderSession(
                 str(blend),
@@ -4675,6 +5666,12 @@ def run_gui(args: argparse.Namespace) -> int:
                     else:
                         self.log_queue.put(f"[VIDEO] Saved: {destination}")
                 status = "completed" if code == 0 else "paused" if code == 131 else "stopped" if code == 130 else "failed"
+                active_job = self.render_queue.get(active_job_id)
+                if active_job is not None:
+                    active_job.status = "pending" if status == "stopped" else status
+                    active_job.error = "" if code == 0 else f"Blender exited with code {code}"
+                    self.save_render_queue()
+                    self.log_queue.put(("__QUEUE_ITEM__", active_job.job_id, active_job.status, active_job.error))
                 self.render_history.add(session.finish(status))
                 self.save_render_history()
                 history_recorded = True
@@ -4682,9 +5679,17 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.log_queue.put(("__FINISHED__", code, "Paused" if code == 131 else "Finished"))
                 self.log_queue.put(f"Process finished with code {code}.")
             except Exception as error:
+                active_job = self.render_queue.get(active_job_id)
+                if active_job is not None:
+                    active_job.status = "failed"
+                    active_job.error = str(error)
+                    self.save_render_queue()
+                    self.log_queue.put(("__QUEUE_ITEM__", active_job.job_id, active_job.status, active_job.error))
                 self.log_queue.put(f"Error: {error}")
                 self.log_queue.put(("__FINISHED__", 1, "Error"))
             finally:
+                if self.active_queue_job_id == active_job_id:
+                    self.active_queue_job_id = None
                 if not history_recorded:
                     self.render_history.add(session.finish("failed"))
                     self.save_render_history()
@@ -4765,6 +5770,7 @@ def run_gui(args: argparse.Namespace) -> int:
                         break
 
                     self.active_queue_job_id = job.job_id
+                    self.render_queue.set_active(job.job_id)
                     job.status = "running"
                     job.attempts += 1
                     job.error = ""
@@ -4802,6 +5808,15 @@ def run_gui(args: argparse.Namespace) -> int:
 
                     job_options = dict(optimize_options)
                     job_options["resolution_percent"] = job.resolution_percent
+                    job_options["compute_backend"] = job.compute_backend
+                    if job.render_device_mode == "CPU":
+                        job_use_cpu, job_use_gpu = True, False
+                    elif job.render_device_mode == "GPU":
+                        job_use_cpu, job_use_gpu = False, True
+                    elif job.render_device_mode == "CPU_GPU":
+                        job_use_cpu, job_use_gpu = True, True
+                    else:
+                        job_use_cpu, job_use_gpu = use_cpu, use_gpu
                     session = RenderSession(
                         str(blend),
                         str(frames),
@@ -4830,8 +5845,8 @@ def run_gui(args: argparse.Namespace) -> int:
                         pause_event=self.pause_event,
                         log=lambda message: self.log_queue.put(message),
                         progress=lambda percent, text: self.log_queue.put(("__PROGRESS__", percent, text)),
-                        use_cpu=use_cpu,
-                        use_gpu=use_gpu,
+                        use_cpu=job_use_cpu,
+                        use_gpu=job_use_gpu,
                         optimize_options=job_options,
                         output_override=output_override or job.compose_video,
                         max_restarts=max_restarts,
@@ -5027,6 +6042,13 @@ def run_gui(args: argparse.Namespace) -> int:
                     self.set_localized(self.status_var, "Network error")
                     self.set_raw(self.status_detail_var, str(message[1]))
                     self.set_localized(self.network_status_var, "Could not start: {error}", error=message[1])
+                    active_job = self.render_queue.active
+                    if active_job is not None and active_job.job_id == self.active_queue_job_id:
+                        active_job.status = "failed"
+                        active_job.error = str(message[1])
+                        self.active_queue_job_id = None
+                        self.save_render_queue()
+                        self.refresh_queue_tree(active_job.job_id)
                     continue
 
                 if isinstance(message, tuple) and len(message) == 3 and message[0] == "__HISTORY_REFRESH__":
@@ -5047,6 +6069,24 @@ def run_gui(args: argparse.Namespace) -> int:
                     previous = set(self.gpu_names)
                     self.cpu_name = cpu
                     self.gpu_names = gpus
+                    self.local_capabilities = DeviceCapabilities(
+                        cpu=cpu,
+                        gpus=gpus,
+                        compute_backends=infer_compute_backends(gpus, platform.system()),
+                        platform=f"{platform.system()} {platform.release()}",
+                    )
+                    active_group = self.group_registry.active
+                    if active_group is not None:
+                        active_group.register_device(
+                            self.group_registry.identity.device_id,
+                            platform.node() or "This PC",
+                            identity_fingerprint=self.group_registry.identity.fingerprint,
+                            capabilities=self.local_capabilities,
+                        )
+                        try:
+                            self.group_registry.save(GROUPS_PATH)
+                        except OSError:
+                            pass
                     self.cpu_info_var.set(cpu)
                     self.gpu_info_var.set("; ".join(gpus))
                     new_devices = [gpu for gpu in gpus if gpu not in previous]
@@ -5159,17 +6199,20 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.set_localized(self.update_status_var, "Already latest: {version}", version=APP_VERSION)
                     else:
                         self.set_raw(self.update_status_var, text)
-                    self.check_update_button.configure(state="normal")
+                    if hasattr(self, "check_update_button"):
+                        self.check_update_button.configure(state="normal")
                     if status == "available" and isinstance(manifest, dict):
                         self.latest_update_manifest = manifest
-                        self.install_update_button.configure(state="normal")
+                        if hasattr(self, "install_update_button"):
+                            self.install_update_button.configure(state="normal")
                         self.log(f"[WATCHDOG] {text}")
                         if self.auto_install_updates_var.get():
                             self.log("[WATCHDOG] Auto install update is enabled. Installing...")
                             self.root.after(500, lambda: self.install_latest_update(ask=False))
                     else:
                         self.latest_update_manifest = None
-                        self.install_update_button.configure(state="disabled")
+                        if hasattr(self, "install_update_button"):
+                            self.install_update_button.configure(state="disabled")
                         self.log(f"[WATCHDOG] {text}")
                     continue
 
