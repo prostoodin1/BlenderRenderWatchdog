@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from render_queue import RenderJob, RenderQueue
+from render_queue import RenderJob, RenderQueue, project_fingerprint
 
 
 class RenderJobTests(unittest.TestCase):
@@ -16,6 +16,29 @@ class RenderJobTests(unittest.TestCase):
     def test_invalid_manual_range_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             RenderJob("scene.blend", use_scene_range=False, start_frame=20, end_frame=10)
+
+    def test_render_distribution_settings_are_normalized(self) -> None:
+        job = RenderJob(
+            "scene.blend",
+            chunk_mode="fixed",
+            chunk_size=20,
+            render_device_mode="gpu",
+            compute_backend="optix",
+        )
+
+        self.assertEqual(job.chunk_label, "20")
+        self.assertEqual(job.render_device_mode, "GPU")
+        self.assertEqual(job.compute_backend, "OPTIX")
+
+    def test_project_fingerprint_changes_with_file_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "scene.blend"
+            path.write_bytes(b"first revision")
+            first = project_fingerprint(path)
+            path.write_bytes(b"second revision")
+
+            self.assertTrue(first)
+            self.assertNotEqual(first, project_fingerprint(path))
 
 
 class RenderQueueTests(unittest.TestCase):
@@ -41,6 +64,44 @@ class RenderQueueTests(unittest.TestCase):
         self.assertEqual(restored.jobs[0].status, "pending")
         self.assertEqual(restored.jobs[0].attempts, 1)
         self.assertEqual(restored.jobs[1].status, "completed")
+
+    def test_round_trip_preserves_one_active_project(self) -> None:
+        first = RenderJob("first.blend")
+        second = RenderJob("second.blend", chunk_mode="fixed", chunk_size=20)
+        queue = RenderQueue([first, second])
+        queue.set_active(second.job_id)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "queue.json"
+            queue.save(path)
+            restored = RenderQueue.load(path)
+
+        self.assertEqual(restored.active_job_id, second.job_id)
+        self.assertEqual(restored.active.project_name, "second.blend")
+        self.assertEqual(restored.active_snapshot()["chunk_size"], 20)
+
+    def test_old_queue_selects_a_single_active_project_during_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "queue.json"
+            path.write_text(
+                json.dumps({"version": 1, "jobs": [{"blend_path": "first.blend"}, {"blend_path": "second.blend"}]}),
+                encoding="utf-8",
+            )
+            restored = RenderQueue.load(path)
+
+        self.assertEqual(restored.active, restored.jobs[0])
+
+    def test_add_or_update_deduplicates_the_same_project(self) -> None:
+        first = RenderJob("scene.blend", chunk_size=10)
+        queue = RenderQueue([first])
+
+        updated = queue.add_or_update(RenderJob("scene.blend", chunk_mode="fixed", chunk_size=20))
+
+        self.assertEqual(len(queue.jobs), 1)
+        self.assertEqual(updated.job_id, first.job_id)
+        self.assertEqual(updated.project_id, first.project_id)
+        self.assertEqual(updated.chunk_size, 20)
+        self.assertEqual(queue.active, updated)
 
     def test_invalid_jobs_are_skipped_while_loading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
