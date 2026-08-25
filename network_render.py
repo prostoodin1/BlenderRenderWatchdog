@@ -6,6 +6,7 @@ import base64
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -22,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from device_groups import DeviceCapabilities
 from frame_validation import validate_frame
 from process_utils import hidden_subprocess_kwargs
 
@@ -30,6 +32,7 @@ MAX_WORKERS = 5
 WORKER_OFFLINE_SECONDS = 30
 WORKER_HEARTBEAT_SECONDS = 10.0
 IMAGE_EXTENSIONS = {".bmp", ".exr", ".hdr", ".jpeg", ".jpg", ".png", ".tga", ".tif", ".tiff", ".webp"}
+COMPUTE_BACKENDS = {"AUTO", "OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"}
 
 
 def lan_address() -> str:
@@ -150,10 +153,26 @@ class WorkerState:
     samples: int | None = None
     use_cpu: bool = True
     use_gpu: bool = True
+    device_id: str = ""
+    identity_fingerprint: str = ""
+    capabilities: dict[str, object] = field(default_factory=dict)
+    compute_backend: str = "AUTO"
+    chunk_size: int | None = None
+    current_frames: list[int] = field(default_factory=list)
+    disabled: bool = False
+
+    def __post_init__(self) -> None:
+        self.device_id = str(self.device_id or self.worker_id).strip()
+        self.identity_fingerprint = str(self.identity_fingerprint).strip()[:128]
+        self.compute_backend = str(self.compute_backend).strip().upper()
+        if self.compute_backend not in COMPUTE_BACKENDS:
+            self.compute_backend = "AUTO"
+        if self.chunk_size is not None:
+            self.chunk_size = max(1, min(1000, int(self.chunk_size)))
 
     def public_dict(self) -> dict[str, object]:
         data = asdict(self)
-        data["online"] = time.time() - self.last_seen < WORKER_OFFLINE_SECONDS
+        data["online"] = not self.disabled and time.time() - self.last_seen < WORKER_OFFLINE_SECONDS
         data["render_device"] = render_device_label(self.use_cpu, self.use_gpu)
         return data
 
@@ -166,18 +185,25 @@ def render_device_label(use_cpu: bool, use_gpu: bool) -> str:
     return "CPU"
 
 
-def worker_device_script(use_cpu: bool, use_gpu: bool, samples: int | None) -> str:
+def worker_device_script(
+    use_cpu: bool,
+    use_gpu: bool,
+    samples: int | None,
+    compute_backend: str = "AUTO",
+) -> str:
     """Build the per-frame Cycles device setup used by remote workers."""
     return f'''import bpy
 USE_CPU = {bool(use_cpu)!r}
 USE_GPU = {bool(use_gpu)!r}
 SAMPLES = {int(samples) if samples is not None else None!r}
+COMPUTE_BACKEND = {str(compute_backend).strip().upper()!r}
 scene = bpy.context.scene
 if scene.render.engine == "CYCLES":
     prefs = bpy.context.preferences.addons["cycles"].preferences
     selected_backend = None
     if USE_GPU:
-        for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
+        backend_order = (COMPUTE_BACKEND,) if COMPUTE_BACKEND != "AUTO" else ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
+        for backend in backend_order:
             try:
                 prefs.compute_device_type = backend
                 prefs.get_devices()
@@ -214,6 +240,16 @@ class FrameTask:
     error: str = ""
 
 
+@dataclass(slots=True)
+class FrameBatch:
+    frames: list[int]
+    worker_id: str
+
+    @property
+    def first_frame(self) -> int | None:
+        return self.frames[0] if self.frames else None
+
+
 class NetworkRenderPlan:
     def __init__(
         self,
@@ -222,10 +258,16 @@ class NetworkRenderPlan:
         start_frame: int,
         end_frame: int,
         completed_frames: set[int] | None = None,
+        chunk_mode: str = "adaptive",
+        chunk_size: int = 10,
+        project_id: str = "",
+        source_fingerprint: str = "",
     ) -> None:
         if start_frame > end_frame:
             raise ValueError("start_frame cannot be greater than end_frame")
         self.plan_id = uuid.uuid4().hex
+        self.project_id = str(project_id or self.plan_id)
+        self.source_fingerprint = str(source_fingerprint)
         self.blend_path = blend_path
         self.output_folder = output_folder
         self.start_frame = start_frame
@@ -238,36 +280,75 @@ class NetworkRenderPlan:
         self.paused = False
         self.stopped = False
         self.created_at = time.time()
+        self.chunk_mode = "fixed" if chunk_mode == "fixed" else "adaptive"
+        self.chunk_size = max(1, min(1000, int(chunk_size)))
         self.integrity_retries = 0
         self.last_corrupt_frames: list[int] = []
         self.integrity_audited = False
         self._lock = threading.RLock()
 
-    def claim(self, worker: WorkerState, reserved_ranges: list[tuple[int, int]] | None = None) -> FrameTask | None:
-        with self._lock:
-            if self.paused or self.stopped:
-                return None
-            minimum = worker.frame_start if worker.frame_start is not None else self.start_frame
-            maximum = worker.frame_end if worker.frame_end is not None else self.end_frame
+    def _candidate_tasks(
+        self,
+        worker: WorkerState,
+        reserved_ranges: list[tuple[int, int]] | None = None,
+    ) -> list[FrameTask]:
+        minimum = worker.frame_start if worker.frame_start is not None else self.start_frame
+        maximum = worker.frame_end if worker.frame_end is not None else self.end_frame
+        candidates = [
+            task for task in self.tasks.values()
+            if task.status == "pending" and minimum <= task.frame <= maximum
+        ]
+        if worker.frame_start is None and worker.frame_end is None and reserved_ranges:
             candidates = [
-                task for task in self.tasks.values()
-                if task.status == "pending" and minimum <= task.frame <= maximum
+                task for task in candidates
+                if not any(start <= task.frame <= end for start, end in reserved_ranges)
             ]
-            if worker.frame_start is None and worker.frame_end is None and reserved_ranges:
-                candidates = [
-                    task for task in candidates
-                    if not any(start <= task.frame <= end for start, end in reserved_ranges)
-                ]
+        return sorted(candidates, key=lambda item: (item.attempts, item.frame))
+
+    def _adaptive_chunk_size(self, worker: WorkerState) -> int:
+        if worker.chunk_size is not None:
+            return worker.chunk_size
+        if self.chunk_mode == "fixed" or worker.average_seconds <= 0:
+            return self.chunk_size
+        target_seconds = 180.0
+        calculated = round(target_seconds / max(0.1, worker.average_seconds))
+        return max(1, min(self.chunk_size * 2, calculated))
+
+    def claim_batch(
+        self,
+        worker: WorkerState,
+        reserved_ranges: list[tuple[int, int]] | None = None,
+        maximum: int | None = None,
+    ) -> FrameBatch | None:
+        with self._lock:
+            if self.paused or self.stopped or worker.disabled:
+                return None
+            candidates = self._candidate_tasks(worker, reserved_ranges)
             if not candidates:
                 return None
-            task = min(candidates, key=lambda item: (item.attempts, item.frame))
-            task.status = "running"
-            task.worker_id = worker.worker_id
-            task.attempts += 1
-            task.started_at = time.monotonic()
-            worker.current_frame = task.frame
+            target_size = max(1, int(maximum or self._adaptive_chunk_size(worker)))
+            first = candidates[0]
+            candidate_by_frame = {task.frame: task for task in candidates}
+            selected: list[FrameTask] = []
+            for frame in range(first.frame, first.frame + target_size):
+                task = candidate_by_frame.get(frame)
+                if task is None:
+                    break
+                selected.append(task)
+            started_at = time.monotonic()
+            for task in selected:
+                task.status = "running"
+                task.worker_id = worker.worker_id
+                task.attempts += 1
+                task.started_at = started_at
+            worker.current_frames = [task.frame for task in selected]
+            worker.current_frame = worker.current_frames[0] if worker.current_frames else None
             worker.last_seen = time.time()
-            return task
+            return FrameBatch(list(worker.current_frames), worker.worker_id)
+
+    def claim(self, worker: WorkerState, reserved_ranges: list[tuple[int, int]] | None = None) -> FrameTask | None:
+        batch = self.claim_batch(worker, reserved_ranges, maximum=1)
+        return self.tasks[batch.frames[0]] if batch else None
 
     def stop(self) -> None:
         with self._lock:
@@ -276,13 +357,23 @@ class NetworkRenderPlan:
                 if task.status == "pending":
                     task.status = "failed"
 
-    def complete(self, worker: WorkerState, frame: int, success: bool, error: str = "") -> FrameTask:
+    def complete(
+        self,
+        worker: WorkerState,
+        frame: int,
+        success: bool,
+        error: str = "",
+        duration_seconds: float | None = None,
+    ) -> FrameTask:
         with self._lock:
             task = self.tasks[frame]
-            task.duration_seconds = max(0.0, time.monotonic() - task.started_at) if task.started_at else 0.0
+            measured = time.monotonic() - task.started_at if task.started_at else 0.0
+            task.duration_seconds = max(0.0, float(duration_seconds if duration_seconds is not None else measured))
             task.error = error
             worker.last_seen = time.time()
-            worker.current_frame = None
+            if frame in worker.current_frames:
+                worker.current_frames.remove(frame)
+            worker.current_frame = worker.current_frames[0] if worker.current_frames else None
             if success:
                 task.status = "completed"
                 worker.completed_frames += 1
@@ -304,6 +395,9 @@ class NetworkRenderPlan:
                     task.status = "pending"
                     task.worker_id = ""
                     released.append(task.frame)
+                    if worker and task.frame in worker.current_frames:
+                        worker.current_frames.remove(task.frame)
+                        worker.current_frame = worker.current_frames[0] if worker.current_frames else None
             return released
 
     def release_worker(self, worker_id: str) -> list[int]:
@@ -318,7 +412,7 @@ class NetworkRenderPlan:
                     released.append(task.frame)
         return released
 
-    def summary(self) -> dict[str, object]:
+    def summary(self, workers: dict[str, WorkerState] | None = None) -> dict[str, object]:
         with self._lock:
             counts = {status: 0 for status in ("pending", "running", "completed", "failed")}
             for task in self.tasks.values():
@@ -327,11 +421,24 @@ class NetworkRenderPlan:
             elapsed_seconds = max(0.0, time.time() - self.created_at)
             rendered_now = max(0, counts["completed"] - self.initial_completed)
             frames_per_minute = (rendered_now / elapsed_seconds * 60.0) if elapsed_seconds > 0 and rendered_now else 0.0
+            if workers:
+                worker_rate = sum(
+                    60.0 / worker.average_seconds
+                    for worker in workers.values()
+                    if not worker.disabled
+                    and time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS
+                    and worker.average_seconds > 0
+                )
+                if worker_rate > 0:
+                    frames_per_minute = worker_rate
             remaining_frames = counts["pending"] + counts["running"]
             eta_seconds = (remaining_frames / frames_per_minute * 60.0) if frames_per_minute > 0 else 0.0
             counts.update(
                 {
                     "plan_id": self.plan_id,
+                    "project_id": self.project_id,
+                    "project_name": self.blend_path.name,
+                    "source_fingerprint": self.source_fingerprint,
                     "start_frame": self.start_frame,
                     "end_frame": self.end_frame,
                     "total": total,
@@ -341,6 +448,8 @@ class NetworkRenderPlan:
                     "frames_per_minute": frames_per_minute,
                     "frames_per_hour": frames_per_minute * 60.0,
                     "eta_seconds": eta_seconds,
+                    "chunk_mode": self.chunk_mode,
+                    "chunk_size": self.chunk_size,
                     "paused": self.paused,
                     "stopped": self.stopped,
                     "finished": counts["completed"] + counts["failed"] == total,
@@ -370,6 +479,8 @@ class RenderCoordinator:
         controller_hardware: str = "",
         on_event: Callable[[str], None] | None = None,
         on_frame: Callable[[int, Path, float], None] | None = None,
+        group_id: str = "",
+        controller_device_id: str = "",
     ) -> None:
         self.bind_host = bind_host
         self.port = port
@@ -386,10 +497,13 @@ class RenderCoordinator:
         self.pairing_pin_expires_at = time.time() + 600
         self._pair_attempts: dict[str, list[float]] = {}
         self.controller_name = controller_name or socket.gethostname()
+        self.group_id = str(group_id or uuid.uuid4().hex)
+        self.controller_device_id = str(controller_device_id or "controller")
         self.controller_hardware = controller_hardware
         self.on_event = on_event
         self.on_frame = on_frame
         self.workers: dict[str, WorkerState] = {}
+        self.workers_by_device: dict[str, str] = {}
         self.plan: NetworkRenderPlan | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -527,6 +641,10 @@ class RenderCoordinator:
                             str(data.get("hardware") or ""),
                             bool(data.get("use_cpu", True)),
                             bool(data.get("use_gpu", True)),
+                            device_id=str(data.get("device_id") or ""),
+                            identity_fingerprint=str(data.get("identity_fingerprint") or ""),
+                            capabilities=data.get("capabilities") if isinstance(data.get("capabilities"), dict) else None,
+                            compute_backend=str(data.get("compute_backend") or "AUTO"),
                         )
                         self._send_json(result, status)
                     elif route == "/api/heartbeat":
@@ -561,31 +679,90 @@ class RenderCoordinator:
         start_frame: int,
         end_frame: int,
         completed_frames: set[int] | None = None,
+        chunk_mode: str = "adaptive",
+        chunk_size: int = 10,
+        project_id: str = "",
+        source_fingerprint: str = "",
     ) -> NetworkRenderPlan:
         output_folder.mkdir(parents=True, exist_ok=True)
-        self.plan = NetworkRenderPlan(blend_path, output_folder, start_frame, end_frame, completed_frames)
+        self.plan = NetworkRenderPlan(
+            blend_path,
+            output_folder,
+            start_frame,
+            end_frame,
+            completed_frames,
+            chunk_mode=chunk_mode,
+            chunk_size=chunk_size,
+            project_id=project_id,
+            source_fingerprint=source_fingerprint,
+        )
         self.event(f"[NETWORK] Distributed render started: {start_frame}-{end_frame}")
         return self.plan
 
-    def join(self, name: str, hardware: str, use_cpu: bool = True, use_gpu: bool = True) -> tuple[dict[str, object], int]:
+    def join(
+        self,
+        name: str,
+        hardware: str,
+        use_cpu: bool = True,
+        use_gpu: bool = True,
+        *,
+        device_id: str = "",
+        identity_fingerprint: str = "",
+        capabilities: dict[str, object] | None = None,
+        compute_backend: str = "AUTO",
+    ) -> tuple[dict[str, object], int]:
         with self._lock:
-            online = [worker for worker in self.workers.values() if time.time() - worker.last_seen < WORKER_OFFLINE_SECONDS]
-            if len(online) >= MAX_WORKERS:
+            stable_device_id = str(device_id).strip() or uuid.uuid4().hex
+            existing_worker_id = self.workers_by_device.get(stable_device_id)
+            worker = self.workers.get(existing_worker_id or "")
+            online = [
+                current for current in self.workers.values()
+                if not current.disabled and time.time() - current.last_seen < WORKER_OFFLINE_SECONDS
+            ]
+            if worker is None and len(online) >= MAX_WORKERS:
                 return {"ok": False, "error": f"Maximum {MAX_WORKERS} workers reached"}, 409
-            worker = WorkerState(
-                uuid.uuid4().hex,
-                name[:80] or "Worker",
-                hardware[:200],
-                use_cpu=bool(use_cpu),
-                use_gpu=bool(use_gpu),
-            )
-            self.workers[worker.worker_id] = worker
+            normalized_capabilities = DeviceCapabilities.from_dict(capabilities).to_dict()
+            if worker is None:
+                worker = WorkerState(
+                    uuid.uuid4().hex,
+                    name[:80] or "Worker",
+                    hardware[:200],
+                    use_cpu=bool(use_cpu),
+                    use_gpu=bool(use_gpu),
+                    device_id=stable_device_id,
+                    identity_fingerprint=identity_fingerprint,
+                    capabilities=normalized_capabilities,
+                    compute_backend=compute_backend,
+                )
+                self.workers[worker.worker_id] = worker
+                self.workers_by_device[stable_device_id] = worker.worker_id
+            else:
+                fingerprint = str(identity_fingerprint).strip()
+                if worker.identity_fingerprint and fingerprint and worker.identity_fingerprint != fingerprint:
+                    return {"ok": False, "error": "Device identity changed"}, 403
+                worker.name = name[:80] or worker.name
+                worker.hardware = hardware[:200]
+                worker.identity_fingerprint = worker.identity_fingerprint or fingerprint
+                worker.capabilities = normalized_capabilities or worker.capabilities
+                worker.use_cpu = bool(use_cpu)
+                worker.use_gpu = bool(use_gpu)
+                requested_backend = str(compute_backend).strip().upper()
+                worker.compute_backend = requested_backend if requested_backend in COMPUTE_BACKENDS else "AUTO"
+                worker.disabled = False
+                worker.last_seen = time.time()
         self.event(f"[NETWORK] Connected: {worker.name} ({worker.hardware or 'unknown hardware'})")
-        return {"ok": True, "worker_id": worker.worker_id, "max_workers": MAX_WORKERS}, 200
+        return {
+            "ok": True,
+            "worker_id": worker.worker_id,
+            "device_id": worker.device_id,
+            "group_id": self.group_id,
+            "reconnected": existing_worker_id is not None,
+            "max_workers": MAX_WORKERS,
+        }, 200
 
     def heartbeat(self, worker_id: str) -> dict[str, object]:
         worker = self.workers.get(worker_id)
-        if worker is None:
+        if worker is None or worker.disabled:
             return {"ok": False, "state": "disconnected", "error": "Disconnected by controller"}
         worker.last_seen = time.time()
         if self.plan:
@@ -594,17 +771,17 @@ class RenderCoordinator:
 
     def claim_task(self, worker_id: str) -> dict[str, object]:
         worker = self.workers.get(worker_id)
-        if worker is None:
+        if worker is None or worker.disabled:
             return {"ok": False, "state": "disconnected", "error": "Disconnected by controller"}
         worker.last_seen = time.time()
         plan = self.plan
         if plan is None:
             return {"ok": True, "state": "idle"}
         plan.release_stale(self.workers)
-        summary = plan.summary()
+        summary = plan.summary(self.workers)
         if summary["finished"] and int(summary["failed"]) == 0 and not plan.integrity_audited:
             self.audit_completed_outputs(plan)
-            summary = plan.summary()
+            summary = plan.summary(self.workers)
         if summary["finished"]:
             return {"ok": True, "state": "finished", "summary": summary}
         if plan.paused:
@@ -621,18 +798,22 @@ class RenderCoordinator:
                 and (other.frame_start is not None or other.frame_end is not None)
             )
         ]
-        task = plan.claim(worker, reserved_ranges)
-        if task is None:
+        batch = plan.claim_batch(worker, reserved_ranges)
+        if batch is None:
             return {"ok": True, "state": "waiting", "summary": summary}
         return {
             "ok": True,
             "state": "task",
-            "frame": task.frame,
+            "frame": batch.frames[0],
+            "frames": batch.frames,
             "plan_id": plan.plan_id,
+            "project_id": plan.project_id,
             "project_name": plan.blend_path.name,
+            "source_fingerprint": plan.source_fingerprint,
             "samples": worker.samples,
             "use_cpu": worker.use_cpu,
             "use_gpu": worker.use_gpu,
+            "compute_backend": worker.compute_backend,
             "render_device": render_device_label(worker.use_cpu, worker.use_gpu),
         }
 
@@ -657,17 +838,19 @@ class RenderCoordinator:
             temporary = output_path.with_suffix(output_path.suffix + ".part")
             temporary.write_bytes(payload)
             temporary.replace(output_path)
-        task = plan.complete(worker, frame, success, str(data.get("error") or ""))
+        duration_value = data.get("duration_seconds")
+        duration_seconds = float(duration_value) if duration_value is not None else None
+        task = plan.complete(worker, frame, success, str(data.get("error") or ""), duration_seconds)
         if success and output_path:
             self.event(f"[NETWORK] Frame {frame} received from {worker.name}")
             if self.on_frame:
                 self.on_frame(frame, output_path, task.duration_seconds)
         else:
             self.event(f"[NETWORK] Frame {frame} failed on {worker.name}; retry scheduled")
-        summary = plan.summary()
+        summary = plan.summary(self.workers)
         if summary["finished"] and int(summary["failed"]) == 0 and not plan.integrity_audited:
             self.audit_completed_outputs(plan)
-        return {"ok": True, "state": task.status, "summary": plan.summary()}
+        return {"ok": True, "state": task.status, "summary": plan.summary(self.workers)}
 
     def audit_completed_outputs(self, plan: NetworkRenderPlan) -> list[int]:
         """Verify every final frame and requeue corrupt outputs for another worker."""
@@ -718,6 +901,8 @@ class RenderCoordinator:
         samples: int | None,
         use_cpu: bool | None = None,
         use_gpu: bool | None = None,
+        compute_backend: str | None = None,
+        chunk_size: int | None = None,
     ) -> bool:
         worker = self.workers.get(worker_id)
         if worker is None:
@@ -735,6 +920,16 @@ class RenderCoordinator:
         worker.samples = samples
         worker.use_cpu = selected_cpu
         worker.use_gpu = selected_gpu
+        if compute_backend is not None:
+            backend = str(compute_backend).strip().upper()
+            if backend not in COMPUTE_BACKENDS:
+                raise ValueError("Unsupported compute backend")
+            supported = {str(value).upper() for value in worker.capabilities.get("compute_backends", [])}
+            if backend != "AUTO" and supported and backend not in supported:
+                raise ValueError(f"{backend} is not available on this device")
+            worker.compute_backend = backend
+        if chunk_size is not None:
+            worker.chunk_size = max(1, min(1000, int(chunk_size)))
         return True
 
     def set_worker_range(self, worker_id: str, start_frame: int | None, end_frame: int | None) -> bool:
@@ -742,11 +937,14 @@ class RenderCoordinator:
 
     def disconnect_worker(self, worker_id: str) -> bool:
         with self._lock:
-            worker = self.workers.pop(worker_id, None)
+            worker = self.workers.get(worker_id)
             if worker is None:
                 return False
             released = self.plan.release_worker(worker_id) if self.plan else []
             worker.current_frame = None
+            worker.current_frames.clear()
+            worker.disabled = True
+            worker.last_seen = 0.0
         suffix = f"; requeued frames: {', '.join(map(str, released))}" if released else ""
         self.event(f"[NETWORK] Disconnected by controller: {worker.name}{suffix}")
         return True
@@ -770,6 +968,13 @@ class RenderCoordinator:
             "render_device": "GPU + CPU",
             "is_controller": True,
             "settings_worker_id": "",
+            "device_id": self.controller_device_id,
+            "identity_fingerprint": "",
+            "capabilities": {},
+            "compute_backend": "AUTO",
+            "chunk_size": None,
+            "current_frames": [],
+            "disabled": False,
         }
         if local_worker is not None:
             controller_row.update(local_worker)
@@ -779,10 +984,16 @@ class RenderCoordinator:
         devices = [controller_row, *(worker for worker in worker_rows if worker is not local_worker)]
         return {
             "ok": True,
-            "controller": {"name": self.controller_name, "host": self.advertised_host, "transport": self.transport},
+            "controller": {
+                "name": self.controller_name,
+                "host": self.advertised_host,
+                "transport": self.transport,
+                "device_id": self.controller_device_id,
+                "group_id": self.group_id,
+            },
             "workers": worker_rows,
             "devices": devices,
-            "plan": self.plan.summary() if self.plan else None,
+            "plan": self.plan.summary(self.workers) if self.plan else None,
         }
 
 
@@ -830,6 +1041,10 @@ class NetworkWorker:
         render_frame: Callable[[int, Path], tuple[bool, Path | None, str]] | None = None,
         use_cpu: bool = True,
         use_gpu: bool = True,
+        device_id: str = "",
+        identity_fingerprint: str = "",
+        capabilities: DeviceCapabilities | dict[str, object] | None = None,
+        compute_backend: str = "AUTO",
     ) -> None:
         self.connection = PairingCode.decode(code)
         self.blender = blender
@@ -840,6 +1055,14 @@ class NetworkWorker:
         self.render_frame = render_frame
         self.use_cpu = bool(use_cpu)
         self.use_gpu = bool(use_gpu)
+        self.device_id = str(device_id or uuid.uuid4().hex)
+        self.identity_fingerprint = str(identity_fingerprint)
+        if isinstance(capabilities, DeviceCapabilities):
+            self.capabilities = capabilities.to_dict()
+        else:
+            self.capabilities = DeviceCapabilities.from_dict(capabilities).to_dict()
+        requested_backend = str(compute_backend).strip().upper()
+        self.compute_backend = requested_backend if requested_backend in COMPUTE_BACKENDS else "AUTO"
         self.worker_id = ""
         self.stop_event = threading.Event()
         self._project_id = ""
@@ -864,6 +1087,10 @@ class NetworkWorker:
                 "hardware": self.hardware,
                 "use_cpu": self.use_cpu,
                 "use_gpu": self.use_gpu,
+                "device_id": self.device_id,
+                "identity_fingerprint": self.identity_fingerprint,
+                "capabilities": self.capabilities,
+                "compute_backend": self.compute_backend,
             },
         )
         if not result.get("ok"):
@@ -954,6 +1181,7 @@ class NetworkWorker:
                 self.use_cpu if use_cpu is None else bool(use_cpu),
                 self.use_gpu if use_gpu is None else bool(use_gpu),
                 samples,
+                self.compute_backend,
             ),
             encoding="utf-8",
         )
@@ -979,6 +1207,77 @@ class NetworkWorker:
         output = max(candidates, key=lambda path: path.stat().st_mtime, default=None)
         error = (completed.stdout + completed.stderr)[-2000:]
         return completed.returncode == 0 and output is not None, output, error
+
+    def _render_batch(
+        self,
+        frames: list[int],
+        project: Path,
+        samples: int | None = None,
+        use_cpu: bool | None = None,
+        use_gpu: bool | None = None,
+        compute_backend: str | None = None,
+    ) -> tuple[dict[int, tuple[bool, Path | None, str]], Path]:
+        """Render one contiguous frame chunk in a single hidden Blender process."""
+        if not frames:
+            raise ValueError("Render batch is empty")
+        ordered = sorted(dict.fromkeys(int(frame) for frame in frames))
+        if ordered != list(range(ordered[0], ordered[-1] + 1)):
+            raise ValueError("Render batch must contain contiguous frames")
+        frame_folder = self.cache_folder / "frames" / uuid.uuid4().hex
+        frame_folder.mkdir(parents=True, exist_ok=True)
+        device_script = frame_folder / "watchdog_worker_device.py"
+        device_script.write_text(
+            worker_device_script(
+                self.use_cpu if use_cpu is None else bool(use_cpu),
+                self.use_gpu if use_gpu is None else bool(use_gpu),
+                samples,
+                compute_backend or self.compute_backend,
+            ),
+            encoding="utf-8",
+        )
+        command = [
+            str(self.blender),
+            "-b",
+            str(project),
+            "-o",
+            str(frame_folder / "frame_####"),
+            "--python",
+            str(device_script),
+            "-s",
+            str(ordered[0]),
+            "-e",
+            str(ordered[-1]),
+            "-a",
+        ]
+        started_at = time.monotonic()
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
+        elapsed = max(0.0, time.monotonic() - started_at)
+        error = (completed.stdout + completed.stderr)[-2000:]
+        outputs: dict[int, Path] = {}
+        for path in frame_folder.iterdir():
+            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            match = re.search(r"(\d+)(?=\.[^.]+$)", path.name)
+            if match:
+                outputs[int(match.group(1))] = path
+        per_frame_seconds = elapsed / len(ordered) if ordered else 0.0
+        results = {
+            frame: (
+                completed.returncode == 0 and frame in outputs,
+                outputs.get(frame),
+                "" if completed.returncode == 0 and frame in outputs else error or "Blender did not create the frame",
+            )
+            for frame in ordered
+        }
+        self._last_batch_frame_seconds = per_frame_seconds
+        return results, frame_folder
 
     def _heartbeat_loop(self, finished: threading.Event, interval: float) -> None:
         while not finished.wait(max(0.01, interval)) and not self.stop_event.is_set():
@@ -1029,34 +1328,59 @@ class NetworkWorker:
                         if self._project_id != plan_id or self._project_path is None or not self._project_path.exists():
                             self.event("[NETWORK] Downloading project...")
                             self._download_project(plan_id, str(task.get("project_name") or "project.blend"))
-                        frame = int(task["frame"])
+                        raw_frames = task.get("frames")
+                        frames = (
+                            [int(frame) for frame in raw_frames]
+                            if isinstance(raw_frames, list) and raw_frames
+                            else [int(task["frame"])]
+                        )
                         samples = int(task["samples"]) if task.get("samples") is not None else None
                         self.use_cpu = bool(task.get("use_cpu", self.use_cpu))
                         self.use_gpu = bool(task.get("use_gpu", self.use_gpu))
-                        self.event(f"[NETWORK] Rendering frame {frame}")
+                        backend = str(task.get("compute_backend") or self.compute_backend).strip().upper()
+                        self.compute_backend = backend if backend in COMPUTE_BACKENDS else "AUTO"
+                        range_label = str(frames[0]) if len(frames) == 1 else f"{frames[0]}–{frames[-1]}"
+                        self.event(f"[NETWORK] Rendering frames {range_label}")
                         if self.render_frame:
-                            success, output, error = self.render_frame(frame, self._project_path)
+                            rendered = {}
+                            batch_folder = None
+                            for frame in frames:
+                                started_at = time.monotonic()
+                                success, output, error = self.render_frame(frame, self._project_path)
+                                rendered[frame] = (success, output, error, max(0.0, time.monotonic() - started_at))
                         else:
-                            success, output, error = self._render_frame(
-                                frame,
+                            batch_results, batch_folder = self._render_batch(
+                                frames,
                                 self._project_path,
                                 samples,
                                 self.use_cpu,
                                 self.use_gpu,
+                                self.compute_backend,
                             )
-                        result: dict[str, object] = {
-                            "worker_id": self.worker_id,
-                            "frame": frame,
-                            "success": success,
-                            "error": "" if success else error,
-                        }
-                        if success and output:
-                            result["extension"] = output.suffix.lower()
-                            result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
+                            rendered = {
+                                frame: (*batch_results[frame], getattr(self, "_last_batch_frame_seconds", 0.0))
+                                for frame in frames
+                            }
                         try:
-                            _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
+                            for frame in frames:
+                                success, output, error, duration_seconds = rendered[frame]
+                                result: dict[str, object] = {
+                                    "worker_id": self.worker_id,
+                                    "frame": frame,
+                                    "success": success,
+                                    "error": "" if success else error,
+                                    "duration_seconds": duration_seconds,
+                                }
+                                if success and output:
+                                    result["extension"] = output.suffix.lower()
+                                    result["file_base64"] = base64.b64encode(output.read_bytes()).decode("ascii")
+                                _request_json(self.base_url + "/api/result", self.connection.token, result, timeout=600)
                         finally:
-                            self._cleanup_frame_output(output)
+                            if batch_folder is not None and self._is_inside_cache(batch_folder):
+                                shutil.rmtree(batch_folder, ignore_errors=True)
+                            else:
+                                for _success, output, _error, _duration in rendered.values():
+                                    self._cleanup_frame_output(output)
                     finally:
                         heartbeat_finished.set()
                         heartbeat_thread.join(timeout=2)

@@ -18,6 +18,47 @@ class LanDiscoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_announcement(b'{}', "127.0.0.1")
 
+    def test_group_metadata_is_advertised_without_a_connection_secret(self) -> None:
+        group = DiscoveredController(
+            "legacy-controller",
+            "Studio main",
+            "192.168.1.10",
+            48620,
+            False,
+            group_id="group-a",
+            group_name="Studio farm",
+            coordinator_device_id="device-main",
+            device_count=4,
+            security_mode="approval",
+        )
+
+        payload = encode_announcement(group)
+        decoded = decode_announcement(payload, "192.168.1.50")
+
+        self.assertNotIn(b"token", payload)
+        self.assertEqual(decoded.effective_group_id, "group-a")
+        self.assertEqual(decoded.effective_group_name, "Studio farm")
+        self.assertEqual(decoded.device_count, 4)
+        self.assertEqual(decoded.security_mode, "approval")
+
+    def test_member_can_advertise_remembered_group_while_coordinator_is_offline(self) -> None:
+        cached = DiscoveredController(
+            "group-offline",
+            "Studio farm",
+            "192.168.1.20",
+            0,
+            True,
+            group_id="group-offline",
+            coordinator_online=False,
+            joinable=False,
+        )
+
+        decoded = decode_announcement(encode_announcement(cached), "192.168.1.20")
+
+        self.assertFalse(decoded.coordinator_online)
+        self.assertFalse(decoded.joinable)
+        self.assertEqual(decoded.port, 0)
+
     def test_local_probe_finds_running_controller(self) -> None:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.bind(("127.0.0.1", 0))

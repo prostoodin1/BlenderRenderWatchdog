@@ -31,6 +31,35 @@ class PairingCodeTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_fixed_chunk_claims_contiguous_frames(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 30, chunk_mode="fixed", chunk_size=10)
+        worker = WorkerState("a", "Worker")
+
+        batch = plan.claim_batch(worker)
+
+        self.assertEqual(batch.frames, list(range(1, 11)))
+        self.assertEqual(worker.current_frames, list(range(1, 11)))
+        self.assertEqual(plan.summary()["running"], 10)
+
+    def test_manual_worker_chunk_size_overrides_plan_default(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 50, chunk_mode="adaptive", chunk_size=10)
+        worker = WorkerState("a", "Worker", chunk_size=20)
+
+        batch = plan.claim_batch(worker)
+
+        self.assertEqual(batch.frames, list(range(1, 21)))
+
+    def test_device_speed_contributes_to_network_eta(self) -> None:
+        plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 12)
+        worker = WorkerState("a", "Worker", average_seconds=5.0)
+        plan.tasks[1].status = "completed"
+        plan.initial_completed = 0
+
+        summary = plan.summary({worker.worker_id: worker})
+
+        self.assertAlmostEqual(summary["frames_per_minute"], 12.0)
+        self.assertAlmostEqual(summary["eta_seconds"], 55.0)
+
     def test_existing_frames_are_skipped_when_resuming(self) -> None:
         plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 4, completed_frames={1, 3})
         worker = WorkerState("a", "Worker")
@@ -103,6 +132,46 @@ class SchedulerTests(unittest.TestCase):
 
 
 class CoordinatorHttpTests(unittest.TestCase):
+    def test_same_stable_device_reconnects_without_duplicate_row(self) -> None:
+        coordinator = RenderCoordinator()
+        first, first_status = coordinator.join(
+            "Worker",
+            "CPU A",
+            device_id="stable-device",
+            identity_fingerprint="same-key",
+            capabilities={"cpu": "CPU A", "compute_backends": ["CUDA"]},
+        )
+        second, second_status = coordinator.join(
+            "Worker renamed",
+            "CPU B",
+            device_id="stable-device",
+            identity_fingerprint="same-key",
+            capabilities={"cpu": "CPU B", "compute_backends": ["OPTIX"]},
+        )
+
+        self.assertEqual(first_status, 200)
+        self.assertEqual(second_status, 200)
+        self.assertEqual(first["worker_id"], second["worker_id"])
+        self.assertTrue(second["reconnected"])
+        self.assertEqual(len(coordinator.workers), 1)
+        worker = coordinator.workers[str(second["worker_id"])]
+        self.assertEqual(worker.name, "Worker renamed")
+        self.assertEqual(worker.capabilities["compute_backends"], ["OPTIX"])
+
+    def test_device_cannot_reconnect_with_changed_identity(self) -> None:
+        coordinator = RenderCoordinator()
+        coordinator.join("Worker", "GPU", device_id="stable-device", identity_fingerprint="first-key")
+
+        result, status = coordinator.join(
+            "Impostor",
+            "GPU",
+            device_id="stable-device",
+            identity_fingerprint="another-key",
+        )
+
+        self.assertEqual(status, 403)
+        self.assertFalse(result["ok"])
+
     def test_one_time_pin_issues_reusable_device_token_and_rotates(self) -> None:
         trusted: list[tuple[str, str]] = []
         coordinator = RenderCoordinator(
@@ -230,11 +299,45 @@ class CoordinatorHttpTests(unittest.TestCase):
             coordinator.set_worker_settings(str(worker_id), None, None, None, False, False)
 
     def test_worker_device_script_applies_gpu_cpu_and_samples(self) -> None:
-        script = worker_device_script(True, True, 128)
+        script = worker_device_script(True, True, 128, "OPTIX")
         self.assertIn("USE_CPU = True", script)
         self.assertIn("USE_GPU = True", script)
         self.assertIn("SAMPLES = 128", script)
         self.assertIn('scene.cycles.device = "GPU"', script)
+        self.assertIn("COMPUTE_BACKEND = 'OPTIX'", script)
+
+    def test_worker_backend_must_be_supported_when_capabilities_are_known(self) -> None:
+        coordinator = RenderCoordinator()
+        joined = coordinator.join(
+            "Test",
+            "GPU",
+            device_id="gpu-device",
+            capabilities={"compute_backends": ["CUDA"]},
+        )[0]
+
+        with self.assertRaises(ValueError):
+            coordinator.set_worker_settings(
+                str(joined["worker_id"]),
+                None,
+                None,
+                None,
+                False,
+                True,
+                compute_backend="OPTIX",
+            )
+
+        self.assertTrue(
+            coordinator.set_worker_settings(
+                str(joined["worker_id"]),
+                None,
+                None,
+                None,
+                False,
+                True,
+                compute_backend="CUDA",
+                chunk_size=20,
+            )
+        )
 
     def test_full_worker_loop_downloads_project_and_uploads_frames(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
