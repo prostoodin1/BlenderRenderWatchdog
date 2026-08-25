@@ -12,6 +12,8 @@
 ### Persistent render groups
 
 - Added saved render groups with open or one-time-code LAN access and `brw://join/...` invitations.
+- Added one-click SSH invitations: the main PC creates a dedicated Ed25519 key, authorizes it through Windows OpenSSH and embeds the worker credential in the share link.
+- Workers extract embedded SSH credentials into a restricted local file and never persist the private key in the regular application config.
 - Added stable installation identities and hardware capability records so reconnects and IP changes do not duplicate devices.
 - Added group discovery metadata without exposing access tokens and cached offline members for a stable device list.
 - Added manual coordinator takeover for a saved group when its previous main PC is unavailable.
@@ -23,7 +25,7 @@
 - Render workers now process a contiguous frame batch in one hidden Blender launch.
 - Network ETA now uses the measured throughput of online workers.
 - Added a code-native connection icon and disabled heavyweight effects on the unified navigation path.
-- Expanded the automated suite to 99 tests covering project state, groups, stable reconnects, chunks, backends and LAN metadata.
+- Expanded the automated suite to 102 tests covering project state, groups, stable reconnects, chunks, backends, SSH invitations and LAN metadata.
 
 ## 2.6.0 — 2026-08-22
 
