@@ -1,10 +1,10 @@
-# Blender Render Watchdog 3.0.1
+# Blender Render Watchdog 3.0.3
 
-> Версия 3.0.1 возвращает полноценную вкладку **Settings** в единый интерфейс 3.0 и сохраняет все настройки приложения в одном лёгком прокручиваемом экране.
+> Версия 3.0.3 делает группы устройств действительно постоянными: отдельные режимы главного ПК и worker, видимые LAN-группы, запомненные SSH-маршруты, автоматическое переподключение и непрерывные пачки кадров.
 
-![Blender Render Watchdog 3.0.1 — Workspace](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Workspace.jpg)
+![Blender Render Watchdog 3.0.3 — Main PC](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Main-PC.jpg)
 
-![Blender Render Watchdog 3.0.1 — Settings](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Settings.jpg)
+![Blender Render Watchdog 3.0.3 — Worker](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Worker.jpg)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -17,6 +17,15 @@
 > В версии 2.1.1 в **Settings → Interface** добавлен мгновенный выбор языка: English и Русский. Выбор сохраняется между запусками.
 
 Windows-приложение для надёжного фонового рендера Blender. Watchdog продолжает анимацию после сбоя, управляет очередью проектов, распределяет кадры между компьютерами и показывает состояние рендера на телефоне.
+
+## Что нового в 3.0.3
+
+- в карточке группы появились отдельные мини-вкладки **Main PC** и **Worker**;
+- worker видит списком открытые LAN-группы и ранее запомненные SSH-группы, даже если они временно недоступны;
+- главный ПК одной кнопкой создаёт SSH-ключ и готовое приглашение, а оба устройства запоминают маршрут и стабильный ID друг друга;
+- после краткого обрыва worker автоматически переподключается и продолжает работу без нового устройства в списке;
+- пачка рендерится непрерывно до `N из N`, после чего worker сразу получает следующие кадры;
+- CPU/GPU, Cycles backend и размер пачки сохраняются для всего компьютера и больше не меняются при выборе проекта.
 
 ## Что нового в 3.0.1
 

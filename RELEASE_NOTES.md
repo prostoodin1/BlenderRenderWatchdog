@@ -1,26 +1,35 @@
-# Blender Render Watchdog 3.0.1
+# Blender Render Watchdog 3.0.3
 
-Небольшой исправляющий релиз возвращает **Settings** в основную навигацию интерфейса 3.0.
+Релиз завершает новый сценарий групп устройств: главный компьютер публикует группу, worker выбирает её из списка, а сохранённые LAN/SSH-подключения восстанавливаются после перезапуска и временного обрыва.
 
-![Blender Render Watchdog 3.0.1 — Workspace](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Workspace.jpg)
+![Blender Render Watchdog 3.0.3 — Main PC](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Main-PC.jpg)
 
-![Blender Render Watchdog 3.0.1 — Settings](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.1/BlenderRenderWatchdog-3.0.1-Settings.jpg)
+![Blender Render Watchdog 3.0.3 — Worker](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Worker.jpg)
 
-## Что исправлено
+## Группы и подключение
 
-- вкладка **Settings** снова отображается рядом с Workspace, Insights, Sandbox, Advanced и Logs;
-- верхняя кнопка **Settings** теперь переключает основную вкладку вместо создания отдельного тяжёлого окна;
-- настройки обновлений, питания, языка, цветовой темы, мобильной панели и LAN-безопасности снова доступны на одном экране;
-- страница использует общий облегчённый контейнер интерфейса 3.0.
+- отдельные мини-вкладки **Main PC** и **Worker** вместо смешанных элементов управления;
+- список доступных открытых LAN-групп и запомненных SSH-групп на стороне worker;
+- стабильный токен группы, маршрут, SSH identity и характеристики устройства сохраняются между запусками;
+- кнопка **Generate SSH key** создаёт ключ и готовое приглашение без ручного придумывания;
+- автоматический повторный вход worker после временного исчезновения главного ПК или SSH-туннеля;
+- повторное подключение обновляет существующее устройство, а не создаёт дубликат.
+
+## Рендер и настройки компьютера
+
+- Blender обрабатывает непрерывную пачку кадров и показывает прогресс `N из N` прямо в списке устройств;
+- после завершения пачки worker без остановки забирает следующий доступный блок;
+- CPU/GPU, Cycles backend и размер пачки стали глобальным сохранённым профилем компьютера;
+- переключение проекта в очереди больше не заменяет этот профиль старыми параметрами файла.
 
 ## Проверка и размер кода
 
-- **102 автоматических теста — все пройдены**;
-- основной скрипт `blender_render_watchdog.py`: **6 522 строки**;
-- runtime-модули Python: **11 908 строк**;
+- **106 автоматических тестов — все пройдены**;
+- основной скрипт `blender_render_watchdog.py`: **6 816 строк**;
+- runtime-модули Python: **12 386 строк**;
 - Android `MainActivity.java`: **879 строк**;
-- тесты: **1 454 строки**;
-- Windows EXE визуально проверен на Workspace, вкладке Settings и переходе через верхнюю кнопку;
-- Windows EXE и Android APK собраны для версии 3.0.1.
+- тесты: **1 587 строк**;
+- Windows EXE визуально проверен в режимах Main PC и Worker;
+- Windows EXE и Android APK собраны для версии 3.0.3.
 
-SHA-256 `BlenderRenderWatchdog.exe`: `a7d9259255bbbda5341798dd84a5c92d03fba4a56553c79d5ff56c092096544d`
+SHA-256 `BlenderRenderWatchdog.exe`: `05227902285d23530b69590b037536108bd3a666e229a3484e4e7a3b1dbb3056`

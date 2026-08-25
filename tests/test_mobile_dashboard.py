@@ -7,7 +7,7 @@ from mobile_dashboard import DASHBOARD_HTML, MobileDashboardServer
 
 class MobileDashboardTests(unittest.TestCase):
     def test_dashboard_uses_the_250_glass_theme(self) -> None:
-        self.assertIn("BLENDER RENDER WATCHDOG 3.0.1", DASHBOARD_HTML)
+        self.assertIn("BLENDER RENDER WATCHDOG 3.0.3", DASHBOARD_HTML)
         self.assertIn("border-radius:28px", DASHBOARD_HTML)
         self.assertIn("prefers-reduced-motion:reduce", DASHBOARD_HTML)
 

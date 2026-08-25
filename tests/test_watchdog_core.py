@@ -16,8 +16,8 @@ from blender_render_watchdog import (
 
 
 class ReleaseVersionTests(unittest.TestCase):
-    def test_release_version_is_301(self) -> None:
-        self.assertEqual(APP_VERSION, "3.0.1")
+    def test_release_version_is_303(self) -> None:
+        self.assertEqual(APP_VERSION, "3.0.3")
 
 
 class BackgroundProcessTests(unittest.TestCase):

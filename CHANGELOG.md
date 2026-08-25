@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## 3.0.3 — 2026-08-25
+
+### Render group workflow
+
+- Split the compact group controls into dedicated Main PC and Worker mini-tabs.
+- Added a worker-side list that merges live LAN groups with remembered SSH routes.
+- Persisted group access tokens, remote routes and per-group SSH identities so devices remain recognizable across restarts and network changes.
+- Added a visible one-click SSH key action to the Main PC tab and group metadata to reusable invitations.
+- Added automatic worker rejoin after a temporary controller or tunnel outage while preserving explicit controller disconnects.
+
+### Continuous frame chunks
+
+- Added live `completed/total` progress for each assigned frame chunk.
+- Workers immediately claim the next contiguous chunk after finishing the current one.
+- Hidden Blender batch launches now report completed output frames while the process is still running.
+
+### Computer-wide render profile
+
+- Made CPU/GPU mode, Cycles backend and chunk size persistent settings of the computer instead of the selected project.
+- Prevented queue selection from replacing the saved hardware profile with stale values from another `.blend`.
+- Applied the same global profile to normal queue renders and network plans.
+
 ## 3.0.1 — 2026-08-25
 
 ### Settings navigation

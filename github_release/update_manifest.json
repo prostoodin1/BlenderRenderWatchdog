@@ -1,0 +1,5 @@
+﻿{
+    "version":  "3.0.3",
+    "exe_url":  "https://github.com/prostoodin1/BlenderRenderWatchdog/releases/latest/download/BlenderRenderWatchdog.exe",
+    "notes":  "Blender Render Watchdog v3.0.3 — persistent groups, automatic reconnect and global hardware profile"
+}
