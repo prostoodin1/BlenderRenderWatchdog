@@ -96,7 +96,7 @@ HISTORY_PATH = app_config_dir() / "render_history.json"
 GROUPS_PATH = app_config_dir() / "render_groups.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
 DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
@@ -2267,7 +2267,7 @@ def run_gui(args: argparse.Namespace) -> int:
             ui.Label(project_head, textvariable=self.active_project_var, style="Chip.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 0))
             header_actions = ui.Frame(header, style="Top.TFrame")
             header_actions.grid(row=0, column=2, sticky="e")
-            ui.Button(header_actions, text="Settings", command=self.open_settings_window).grid(row=0, column=0, padx=(0, 8))
+            ui.Button(header_actions, text="Settings", command=self.show_settings_tab).grid(row=0, column=0, padx=(0, 8))
             self.status_card = GlassCard(
                 header_actions,
                 palette=c,
@@ -2341,10 +2341,13 @@ def run_gui(args: argparse.Namespace) -> int:
             logs_page = scrollable_page("  Logs  ")
             logs_page.columnconfigure(0, weight=1)
             logs_page.rowconfigure(0, weight=1)
+            settings_page = scrollable_page("  Settings  ")
+            self.settings_tab_index = len(self.notebook.pages) - 1
 
             self.build_insights_tab(insights_page, ui)
             self.build_sandbox_tab(sandbox_page, ui)
             self.build_advanced_tab(advanced_page, ui)
+            self.build_settings_tab(settings_page, ui)
 
             console_card = self.make_card(logs_page, ui, row=0, column=0, sticky="nsew")
             console_card.rowconfigure(1, weight=1)
@@ -2752,6 +2755,16 @@ def run_gui(args: argparse.Namespace) -> int:
                 dialog.destroy()
 
             dialog.protocol("WM_DELETE_WINDOW", close)
+
+        def show_settings_tab(self) -> None:
+            """Open the settings page in the main navigation."""
+            notebook = getattr(self, "notebook", None)
+            index = getattr(self, "settings_tab_index", None)
+            if notebook is None or index is None:
+                self.open_settings_window()
+                return
+            notebook.select(index)
+            self.root.after_idle(self.refresh_tab_scroll_regions)
 
         def open_connection_settings(self) -> None:
             dialog = tk.Toplevel(self.root)
