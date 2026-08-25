@@ -1,10 +1,10 @@
-# Blender Render Watchdog 2.6.0
+# Blender Render Watchdog 3.0.0
 
-> Версия 2.6.0 делает LAN основным режимом без Tailscale: главные ПК находятся автоматически, новый worker вводит короткий код только один раз, а повторные подключения используют сохранённое доверие. Для подключения через интернет добавлен опциональный SSH-туннель.
+> Версия 3.0.0 объединяет проекты, очередь, рендер и устройства в одном Workspace, добавляет постоянные группы компьютеров, пакетное распределение кадров и готовые SSH-приглашения для подключения через интернет.
 
-![Blender Render Watchdog 2.6.0 — рендер](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.6.0/BlenderRenderWatchdog-2.6.0-Render.png)
+![Blender Render Watchdog 3.0.0 — Workspace](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.0/BlenderRenderWatchdog-3.0.0-Workspace.jpg)
 
-![Blender Render Watchdog 2.6.0 — сеть](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v2.6.0/BlenderRenderWatchdog-2.6.0-Network.png)
+![Blender Render Watchdog 3.0.0 — SSH](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.0/BlenderRenderWatchdog-3.0.0-SSH.jpg)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -18,7 +18,7 @@
 
 Windows-приложение для надёжного фонового рендера Blender. Watchdog продолжает анимацию после сбоя, управляет очередью проектов, распределяет кадры между компьютерами и показывает состояние рендера на телефоне.
 
-## В разработке после 2.6.0
+## Что нового в 3.0.0
 
 - единый **Workspace** вместо отдельных экранов Render, Queue и Network: очередь находится слева, активный проект и рендер — в центре, группа и устройства — справа;
 - один активный проект для настольного интерфейса, сетевого плана и мобильной панели; состояние очереди автоматически мигрирует в новый формат;

@@ -602,7 +602,7 @@ class RenderCoordinator:
         coordinator = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "BlenderRenderWatchdog/2.6.0"
+            server_version = "BlenderRenderWatchdog/3.0.0"
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return

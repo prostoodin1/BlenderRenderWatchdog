@@ -23,7 +23,7 @@ class DiscoveredController:
     host: str
     port: int
     requires_code: bool
-    version: str = "2.6.0"
+    version: str = "3.0.0"
     group_id: str = ""
     group_name: str = ""
     coordinator_device_id: str = ""

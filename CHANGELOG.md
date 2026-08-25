@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.0.0 — 2026-08-25
+
 ### Unified workspace and project queue
 
 - Combined projects, active render state and device groups into one lightweight Workspace.
