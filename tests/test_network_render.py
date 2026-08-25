@@ -33,6 +33,25 @@ class PairingCodeTests(unittest.TestCase):
         connection = PairingCode("127.0.0.1", 48620, "secret")
         self.assertEqual(PairingCode.decode(f"brw://join/{connection.encode()}"), connection)
 
+    def test_ssh_invitation_can_carry_and_then_drop_a_private_key(self) -> None:
+        private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\ntrusted-render-key\n-----END OPENSSH PRIVATE KEY-----\n"
+        invitation = PairingCode(
+            "127.0.0.1",
+            48620,
+            "secret",
+            "ssh",
+            "render.example.com",
+            22,
+            "artist",
+            private_key,
+        )
+
+        decoded = PairingCode.decode(invitation.invitation_link)
+
+        self.assertEqual(decoded.ssh_private_key, private_key)
+        self.assertNotIn("trusted-render-key", repr(decoded))
+        self.assertEqual(decoded.without_private_key().ssh_private_key, "")
+
 
 class SchedulerTests(unittest.TestCase):
     def test_fixed_chunk_claims_contiguous_frames(self) -> None:

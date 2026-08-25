@@ -456,6 +456,17 @@ RUSSIAN_TRANSLATIONS = {
     "Group created. Start it to accept devices.": "Группа создана. Запустите её для подключения устройств.",
     "Disconnect before switching render groups.": "Отключитесь перед переключением группы рендера.",
     "Selected group: {group}": "Выбрана группа: {group}",
+    "Invitation from this main PC": "Приглашение с этого главного ПК",
+    "Creates a dedicated SSH key and copies a trusted invitation link. Share it only with your render devices.": "Создаёт отдельный SSH-ключ и копирует доверенную ссылку-приглашение. Передавайте её только своим устройствам рендера.",
+    "Create and copy SSH invite": "Создать и скопировать SSH-приглашение",
+    "Invitation received on this PC": "Приглашение, полученное на этом ПК",
+    "SSH invitation": "SSH-приглашение",
+    "Switch this device to Main PC before creating an invitation.": "Перед созданием приглашения переключите это устройство в режим главного ПК.",
+    "Creating SSH key and configuring the main PC…": "Создание SSH-ключа и настройка главного ПК…",
+    "SSH invitation is ready and copied": "SSH-приглашение готово и скопировано",
+    "SSH invitation copied; start the group and share it with trusted devices": "SSH-приглашение скопировано; запустите группу и передайте ссылку доверенным устройствам",
+    "The SSH invitation was copied. It contains a private access key, so share it only with devices you trust.": "SSH-приглашение скопировано. Оно содержит приватный ключ доступа, поэтому передавайте его только доверенным устройствам.",
+    "SSH invitation could not be created": "Не удалось создать SSH-приглашение",
 }
 
 

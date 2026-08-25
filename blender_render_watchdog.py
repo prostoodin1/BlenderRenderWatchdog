@@ -52,7 +52,15 @@ from resume_startup import (
     mark_resume_attempt,
     windows_startup_dir,
 )
-from ssh_support import OpenSshState, SshTunnel, launch_openssh_install, query_openssh_state
+from ssh_support import (
+    OpenSshState,
+    SshTunnel,
+    configure_openssh_host,
+    ensure_ssh_invite_key,
+    launch_openssh_install,
+    query_openssh_state,
+    store_invitation_private_key,
+)
 from render_sandbox import SandboxVariant, recommend_variant, run_sandbox
 from video_tools import VIDEO_FORMATS, compose_video, video_output_path
 
@@ -1563,6 +1571,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.autofix_var, "Preflight has not been run")
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value=self.config.get("network_join_code", ""))
+            self.ssh_share_invite_var = tk.StringVar(value="")
+            self.ssh_invite_private_key = ""
+            self.ssh_setup_running = False
             self.network_role_var = tk.StringVar(value=self.config.get("network_role", "connect"))
             self.network_transport = "ssh" if self.config.get("network_transport") == "ssh" else "lan"
             self.network_transport_var = tk.StringVar()
@@ -2745,7 +2756,7 @@ def run_gui(args: argparse.Namespace) -> int:
         def open_connection_settings(self) -> None:
             dialog = tk.Toplevel(self.root)
             dialog.title(self.tr("Connection settings"))
-            dialog.geometry("720x690")
+            dialog.geometry("720x790")
             dialog.resizable(False, False)
             dialog.configure(background=self.colors["bg"])
             dialog.transient(self.root)
@@ -2793,10 +2804,20 @@ def run_gui(args: argparse.Namespace) -> int:
             ui.Button(card, text="Browse", command=self.browse_ssh_identity).grid(row=6, column=2, pady=5)
             ui.Label(card, textvariable=self.openssh_status_var, style="CardHint.TLabel").grid(row=7, column=0, columnspan=2, sticky="w", pady=(10, 0))
             ui.Button(card, text="Install OpenSSH", command=self.install_openssh).grid(row=7, column=2, sticky="e", pady=(10, 0))
-            ui.Label(card, text="Saved invitation", style="Field.TLabel").grid(row=8, column=0, sticky="w", pady=(16, 5))
-            ui.Entry(card, textvariable=self.network_join_code_var).grid(row=9, column=0, columnspan=3, sticky="ew")
+            ui.Label(card, text="Invitation from this main PC", style="Field.TLabel").grid(row=8, column=0, columnspan=3, sticky="w", pady=(16, 5))
+            ui.Entry(card, textvariable=self.ssh_share_invite_var).grid(row=9, column=0, columnspan=3, sticky="ew")
+            ui.Label(
+                card,
+                text="Creates a dedicated SSH key and copies a trusted invitation link. Share it only with your render devices.",
+                style="CardHint.TLabel",
+                wraplength=620,
+                justify="left",
+            ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(5, 0))
+            ui.Button(card, text="Create and copy SSH invite", command=self.create_ssh_invitation).grid(row=10, column=2, sticky="e", pady=(5, 0))
+            ui.Label(card, text="Invitation received on this PC", style="Field.TLabel").grid(row=11, column=0, sticky="w", pady=(16, 5))
+            ui.Entry(card, textvariable=self.network_join_code_var).grid(row=12, column=0, columnspan=3, sticky="ew")
             buttons = ui.Frame(card, style="Surface.TFrame")
-            buttons.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+            buttons.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(18, 0))
             buttons.columnconfigure(0, weight=1)
             ui.Button(buttons, text="Save", style="Primary.TButton", command=lambda: (self.change_network_transport(), self.save_current_config(), dialog.destroy())).grid(row=0, column=0, sticky="ew")
             ui.Button(buttons, text="Connect by invitation", command=lambda: (dialog.destroy(), self.start_network_worker())).grid(row=0, column=1, padx=(8, 0))
@@ -3906,6 +3927,13 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def save_current_config(self) -> None:
             self.config_save_after_id = None
+            stored_join_code = self.network_join_code_var.get().strip()
+            try:
+                stored_connection = PairingCode.decode(stored_join_code)
+                if stored_connection.ssh_private_key:
+                    stored_join_code = stored_connection.without_private_key().invitation_link
+            except ValueError:
+                pass
             active_group = self.group_registry.active
             if active_group is not None:
                 active_group.name = self.network_group_name_var.get().strip()[:80] or active_group.name
@@ -3971,7 +3999,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     "network_saved_connections": json.dumps(self.saved_lan_connections, ensure_ascii=False, separators=(",", ":")),
                     "network_controller_name": self.controller_name_var.get().strip(),
                     "network_worker_name": self.worker_name_var.get().strip(),
-                    "network_join_code": self.network_join_code_var.get().strip(),
+                    "network_join_code": stored_join_code,
                     "network_range_mode": self.network_range_mode_var.get(),
                     "network_manual_start": self.network_manual_start_var.get().strip(),
                     "network_manual_end": self.network_manual_end_var.get().strip(),
@@ -4367,6 +4395,99 @@ def run_gui(args: argparse.Namespace) -> int:
             if path:
                 self.ssh_identity_var.set(path)
 
+        def _ssh_share_connection(self, private_key: str = "") -> PairingCode:
+            ssh_host = self.ssh_host_var.get().strip()
+            ssh_user = self.ssh_user_var.get().strip()
+            ssh_port = int(self.ssh_port_var.get().strip() or "22")
+            if not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535:
+                raise ValueError(self.tr("Enter a valid SSH address, port, and user."))
+            if self.network_controller is not None:
+                controller_port = self.network_controller.port
+                controller_token = self.network_controller.token
+            else:
+                access = resolve_service_access(self.access_mode, self.access_key_var.get(), "network")
+                controller_port = access.port
+                controller_token = access.token
+            return PairingCode(
+                "127.0.0.1",
+                controller_port,
+                controller_token,
+                "ssh",
+                ssh_host,
+                ssh_port,
+                ssh_user,
+                private_key,
+            )
+
+        def _share_link_for_controller(self, fallback: str) -> str:
+            if self.network_transport != "ssh" or not self.ssh_invite_private_key:
+                return fallback
+            try:
+                return self._ssh_share_connection(self.ssh_invite_private_key).invitation_link
+            except (TypeError, ValueError):
+                return fallback
+
+        def create_ssh_invitation(self) -> None:
+            if self.ssh_setup_running:
+                return
+            if self.network_role_var.get() != "host":
+                messagebox.showerror(self.tr("SSH invitation"), self.tr("Switch this device to Main PC before creating an invitation."))
+                return
+            try:
+                connection = self._ssh_share_connection()
+            except (TypeError, ValueError) as error:
+                messagebox.showerror(self.tr("SSH invitation"), str(error))
+                return
+            self.ssh_setup_running = True
+            self.network_transport = "ssh"
+            self.network_transport_var.set(self.tr("SSH tunnel"))
+            self.set_localized(self.openssh_status_var, "Creating SSH key and configuring the main PC…")
+            group_id = self.network_controller_id or self.group_registry.identity.device_id
+            ssh_user = connection.ssh_user
+
+            def setup() -> None:
+                try:
+                    invite_key = ensure_ssh_invite_key(app_config_dir() / "ssh", group_id)
+                    configure_openssh_host(invite_key.public_key, ssh_user)
+                    link = PairingCode(
+                        connection.host,
+                        connection.port,
+                        connection.token,
+                        connection.transport,
+                        connection.ssh_host,
+                        connection.ssh_port,
+                        connection.ssh_user,
+                        invite_key.private_key,
+                    ).invitation_link
+                    self.root.after(0, lambda: self._finish_ssh_invitation(invite_key.private_key, link))
+                except Exception as error:
+                    try:
+                        self.root.after(0, lambda message=str(error): self._fail_ssh_invitation(message))
+                    except tk.TclError:
+                        pass
+
+            threading.Thread(target=setup, name="ssh-invitation-setup", daemon=True).start()
+
+        def _finish_ssh_invitation(self, private_key: str, link: str) -> None:
+            self.ssh_setup_running = False
+            self.ssh_invite_private_key = private_key
+            self.ssh_share_invite_var.set(link)
+            self.network_code_var.set(link)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(link)
+            self.save_current_config()
+            self.set_localized(self.openssh_status_var, "SSH invitation is ready and copied")
+            self.set_localized(self.network_status_var, "SSH invitation copied; start the group and share it with trusted devices")
+            messagebox.showinfo(
+                self.tr("SSH invitation"),
+                self.tr("The SSH invitation was copied. It contains a private access key, so share it only with devices you trust."),
+            )
+
+        def _fail_ssh_invitation(self, message: str) -> None:
+            self.ssh_setup_running = False
+            self.set_localized(self.openssh_status_var, "SSH invitation could not be created")
+            messagebox.showerror(self.tr("SSH invitation"), message)
+
         def save_trusted_network_device(self, token: str, name: str) -> None:
             self.trusted_network_devices[token] = name
             try:
@@ -4572,7 +4693,10 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def start_network_controller(self) -> None:
             if self.network_controller is not None:
-                self.network_code_var.set(self.network_controller.invitation_link)
+                link = self._share_link_for_controller(self.network_controller.invitation_link)
+                self.network_code_var.set(link)
+                if self.network_transport == "ssh":
+                    self.ssh_share_invite_var.set(link)
                 return
             try:
                 advertised_host = None
@@ -4628,7 +4752,10 @@ def run_gui(args: argparse.Namespace) -> int:
                     controller_device_id=self.group_registry.identity.device_id,
                 )
                 code = self.network_controller.start()
-                self.network_code_var.set(self.network_controller.invitation_link)
+                link = self._share_link_for_controller(self.network_controller.invitation_link)
+                self.network_code_var.set(link)
+                if self.network_transport == "ssh":
+                    self.ssh_share_invite_var.set(link)
                 self.network_join_code_var.set(code)
                 self.network_pairing_pin_var.set(self.network_controller.pairing_pin)
                 self.update_pairing_pin_label()
@@ -4675,6 +4802,9 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.status_detail_var, "No new network frames will be assigned")
 
         def copy_network_code(self) -> None:
+            if self.network_role_var.get() == "host" and self.network_transport == "ssh" and not self.ssh_invite_private_key:
+                self.create_ssh_invitation()
+                return
             code = self.network_code_var.get().strip()
             if code:
                 self.root.clipboard_clear()
@@ -4806,6 +4936,15 @@ def run_gui(args: argparse.Namespace) -> int:
             if not state.client_installed:
                 messagebox.showerror(self.tr("Worker connection"), self.tr("Install the OpenSSH client on this PC first."))
                 return
+            if connection.ssh_private_key:
+                try:
+                    embedded_identity = store_invitation_private_key(connection.ssh_private_key, app_config_dir() / "ssh")
+                except (OSError, ValueError) as error:
+                    messagebox.showerror(self.tr("Worker connection"), str(error))
+                    return
+                self.ssh_identity_var.set(str(embedded_identity))
+                self.network_join_code_var.set(connection.without_private_key().invitation_link)
+                self.save_current_config()
             identity_text = self.ssh_identity_var.get().strip().strip('"')
             identity = Path(identity_text) if identity_text else None
             if identity is not None and not identity.is_file():
@@ -6294,7 +6433,14 @@ def main() -> int:
         cli_ssh_tunnel: SshTunnel | None = None
         connection = PairingCode.decode(args.worker_code)
         if connection.transport == "ssh":
-            cli_ssh_tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port)
+            cli_identity = None
+            if connection.ssh_private_key:
+                try:
+                    cli_identity = store_invitation_private_key(connection.ssh_private_key, app_config_dir() / "ssh")
+                except (OSError, ValueError) as error:
+                    print(f"Could not save the SSH invitation key: {error}", flush=True)
+                    return 2
+            cli_ssh_tunnel = SshTunnel(connection.ssh_host, connection.ssh_port, connection.ssh_user, connection.port, cli_identity)
             try:
                 local_port = cli_ssh_tunnel.start()
             except Exception as error:

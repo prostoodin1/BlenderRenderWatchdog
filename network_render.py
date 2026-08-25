@@ -99,12 +99,15 @@ class PairingCode:
     ssh_host: str = ""
     ssh_port: int = 22
     ssh_user: str = ""
+    ssh_private_key: str = field(default="", repr=False)
 
     def encode(self) -> str:
         payload_data: dict[str, object] = {"h": self.host, "p": self.port, "t": self.token}
         prefix = "BRW2-"
         if self.transport == "ssh":
             payload_data.update({"n": "ssh", "sh": self.ssh_host, "sp": self.ssh_port, "su": self.ssh_user})
+            if self.ssh_private_key:
+                payload_data["sk"] = self.ssh_private_key
             prefix = "BRW4-"
         elif self.transport != "lan":
             payload_data["n"] = self.transport
@@ -130,13 +133,39 @@ class PairingCode:
             ssh_host = str(data.get("sh") or "").strip()
             ssh_port = int(data.get("sp") or 22)
             ssh_user = str(data.get("su") or "").strip()
+            ssh_private_key = str(data.get("sk") or "")
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("Invalid Blender Render Watchdog connection code") from error
         if not host or not token or not 1 <= port <= 65535 or transport not in {"lan", "tailscale", "ssh"}:
             raise ValueError("Invalid Blender Render Watchdog connection code")
         if transport == "ssh" and (not ssh_host or not ssh_user or not 1 <= ssh_port <= 65535):
             raise ValueError("Invalid Blender Render Watchdog SSH connection code")
-        return cls(host, port, token, transport, ssh_host, ssh_port, ssh_user)
+        if ssh_private_key and transport != "ssh":
+            raise ValueError("Invalid Blender Render Watchdog SSH invitation key")
+        if ssh_private_key:
+            encoded_key_size = len(ssh_private_key.encode("utf-8"))
+            if (
+                encoded_key_size > 16_384
+                or not ssh_private_key.strip().startswith("-----BEGIN OPENSSH PRIVATE KEY-----")
+                or not ssh_private_key.strip().endswith("-----END OPENSSH PRIVATE KEY-----")
+            ):
+                raise ValueError("Invalid Blender Render Watchdog SSH invitation key")
+        return cls(host, port, token, transport, ssh_host, ssh_port, ssh_user, ssh_private_key)
+
+    @property
+    def invitation_link(self) -> str:
+        return f"brw://join/{self.encode()}"
+
+    def without_private_key(self) -> "PairingCode":
+        return PairingCode(
+            self.host,
+            self.port,
+            self.token,
+            self.transport,
+            self.ssh_host,
+            self.ssh_port,
+            self.ssh_user,
+        )
 
 
 @dataclass(slots=True)
