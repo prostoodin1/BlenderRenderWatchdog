@@ -291,6 +291,35 @@ if scene.render.engine == "CYCLES":
 '''
 
 
+def blender_batch_command(
+    blender: Path,
+    project: Path,
+    frame_folder: Path,
+    device_script: Path,
+    frames: list[int],
+) -> list[str]:
+    """Build one Blender animation command for a contiguous frame assignment."""
+    ordered = sorted(dict.fromkeys(int(frame) for frame in frames))
+    if not ordered:
+        raise ValueError("Render batch is empty")
+    if ordered != list(range(ordered[0], ordered[-1] + 1)):
+        raise ValueError("Render batch must contain contiguous frames")
+    return [
+        str(blender),
+        "-b",
+        str(project),
+        "-o",
+        str(frame_folder / "frame_####"),
+        "--python",
+        str(device_script),
+        "-s",
+        str(ordered[0]),
+        "-e",
+        str(ordered[-1]),
+        "-a",
+    ]
+
+
 @dataclass(slots=True)
 class FrameTask:
     frame: int
@@ -1356,20 +1385,7 @@ class NetworkWorker:
             ),
             encoding="utf-8",
         )
-        command = [
-            str(self.blender),
-            "-b",
-            str(project),
-            "-o",
-            str(frame_folder / "frame_####"),
-            "--python",
-            str(device_script),
-            "-s",
-            str(ordered[0]),
-            "-e",
-            str(ordered[-1]),
-            "-a",
-        ]
+        command = blender_batch_command(self.blender, project, frame_folder, device_script, ordered)
         started_at = time.monotonic()
         log_path = frame_folder / "watchdog_worker.log"
         self.batch_total = len(ordered)

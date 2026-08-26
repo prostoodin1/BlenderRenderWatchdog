@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Simpler worker connection
+
+- Added one visible Main PC action that creates and copies a complete SSH invitation with the group, endpoint, user and dedicated key.
+- Replaced the worker's manual SSH fields with two clear inputs: an SSH invitation link and a BRW/one-time LAN code.
+- Kept host, port and identity controls behind Advanced while offering automatic OpenSSH client installation when required.
+- Preserved group identity metadata in generated SSH invitations and removed embedded private keys from the visible field after import.
+
+### Uninterrupted frame assignments
+
+- Locked contiguous assignments to one Blender animation process, so a 20-frame chunk renders frames 1 through 20 without restarting Blender between frames.
+- Added regression coverage for the single-process `start/end/animation` command.
+
 ## 3.0.3 — 2026-08-25
 
 ### Render group workflow

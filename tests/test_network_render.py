@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
-from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, request_pairing, worker_device_script
+from network_render import NetworkRenderPlan, NetworkWorker, PairingCode, RenderCoordinator, WorkerState, _request_json, blender_batch_command, request_pairing, worker_device_script
 
 
 VALID_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
@@ -70,6 +70,20 @@ class PairingCodeTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_twenty_frame_assignment_uses_one_uninterrupted_blender_animation(self) -> None:
+        command = blender_batch_command(
+            Path("blender.exe"),
+            Path("scene.blend"),
+            Path("frames"),
+            Path("device.py"),
+            list(range(41, 61)),
+        )
+
+        self.assertEqual(command.count("-a"), 1)
+        self.assertNotIn("-f", command)
+        self.assertEqual(command[command.index("-s") + 1], "41")
+        self.assertEqual(command[command.index("-e") + 1], "60")
+
     def test_fixed_chunk_claims_contiguous_frames(self) -> None:
         plan = NetworkRenderPlan(Path("scene.blend"), Path("renders"), 1, 30, chunk_mode="fixed", chunk_size=10)
         worker = WorkerState("a", "Worker")

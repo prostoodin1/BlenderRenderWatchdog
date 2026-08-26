@@ -1575,6 +1575,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_localized(self.autofix_var, "Preflight has not been run")
             self.network_code_var = tk.StringVar(value="")
             self.network_join_code_var = tk.StringVar(value=self.config.get("network_join_code", ""))
+            # The full SSH invitation can contain a private key. Keep the
+            # pasted value in memory only; after connecting, only the safe BRW
+            # route and the protected key file are persisted.
+            self.worker_ssh_invite_var = tk.StringVar(value="")
             self.ssh_share_invite_var = tk.StringVar(value="")
             self.ssh_invite_private_key = ""
             self.ssh_setup_running = False
@@ -2525,7 +2529,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.connection_status_icon.grid(row=0, column=0, sticky="w", padx=(0, 9))
             ui.Label(group_head, text="Render group", style="CardTitle.TLabel").grid(row=0, column=1, sticky="w")
             ui.Button(group_head, text="New group", command=self.create_new_render_group).grid(row=0, column=2, sticky="e", padx=(0, 6))
-            ui.Button(group_head, text="Connection", command=self.open_connection_settings).grid(row=0, column=3, sticky="e")
+            ui.Button(group_head, text="Advanced", command=self.open_connection_settings).grid(row=0, column=3, sticky="e")
             self.network_group_selector = ui.Combobox(
                 group_card,
                 textvariable=self.network_group_selector_var,
@@ -2550,43 +2554,37 @@ def run_gui(args: argparse.Namespace) -> int:
             host_controls.columnconfigure(0, weight=1)
             self.network_controller_card = host_controls
             self.network_role_tabs.add(host_controls, text="Main PC")
-            ui.Entry(host_controls, textvariable=self.network_group_name_var).grid(row=0, column=0, sticky="ew")
+            ui.Entry(host_controls, textvariable=self.network_group_name_var).grid(row=0, column=0, sticky="ew", padx=(0, 7))
+            ui.Button(host_controls, text="Create ready SSH link", command=self.create_ssh_invitation).grid(row=0, column=1, sticky="e")
             self.network_group_security_combo = ui.Combobox(
                 host_controls,
                 textvariable=self.network_group_security_label_var,
                 values=self.localized_group_security_labels(),
                 state="readonly",
             )
-            self.network_group_security_combo.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+            self.network_group_security_combo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
             self.network_group_security_combo.bind("<<ComboboxSelected>>", self.change_group_security)
             options = ui.Frame(host_controls, style="Surface.TFrame")
-            options.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            options.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
             ui.Checkbutton(options, text="Visible on LAN", variable=self.network_advertise_lan_var, command=self.apply_lan_visibility_settings, style="Modern.TCheckbutton").grid(row=0, column=0, sticky="w")
             ui.Checkbutton(options, text="Auto main", variable=self.network_allow_failover_var, command=self.save_current_config, style="Modern.TCheckbutton").grid(row=1, column=0, sticky="w", pady=(4, 0))
             host_actions = ui.Frame(host_controls, style="Surface.TFrame")
-            host_actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            host_actions.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             host_actions.columnconfigure(0, weight=1)
             ui.Button(host_actions, text="Start group", style="Primary.TButton", command=self.start_network_controller).grid(row=0, column=0, sticky="ew")
             ui.Button(host_actions, text="Stop", command=self.stop_network_controller).grid(row=0, column=1, padx=(7, 0))
-            ui.Entry(host_controls, textvariable=self.network_code_var, state="readonly").grid(row=4, column=0, sticky="ew", pady=(8, 0))
+            ui.Entry(host_controls, textvariable=self.network_code_var, state="readonly").grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             pin_row = ui.Frame(host_controls, style="Surface.TFrame")
-            pin_row.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+            pin_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
             pin_row.columnconfigure(0, weight=1)
             self.network_pairing_pin_label = ui.Label(pin_row, text="One-time code: {code}", style="CardHint.TLabel")
             self.network_pairing_pin_label.grid(row=0, column=0, sticky="w")
             ui.Button(pin_row, text="Copy invite", command=self.copy_network_code).grid(row=0, column=1, sticky="e")
             render_actions = ui.Frame(host_controls, style="Surface.TFrame")
-            render_actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+            render_actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             render_actions.columnconfigure(0, weight=1)
             ui.Button(render_actions, text="Render on group", style="Primary.TButton", command=self.start_network_render).grid(row=0, column=0, sticky="ew")
             ui.Button(render_actions, text="Stop render", style="Danger.TButton", command=self.stop_network_render).grid(row=0, column=1, padx=(7, 0))
-            ssh_actions = ui.Frame(host_controls, style="Surface.TFrame")
-            ssh_actions.grid(row=7, column=0, sticky="ew", pady=(9, 0))
-            ssh_actions.columnconfigure(1, weight=1)
-            ui.Button(ssh_actions, text="Generate SSH key", command=self.create_ssh_invitation).grid(row=0, column=0, sticky="w")
-            ui.Entry(ssh_actions, textvariable=self.ssh_share_invite_var, state="readonly").grid(row=0, column=1, sticky="ew", padx=(7, 0))
-            ui.Button(ssh_actions, text="Copy invite", command=self.copy_network_code).grid(row=0, column=2, padx=(7, 0))
-
             join_controls = ui.Frame(self.network_role_tabs.page_host, style="Surface.TFrame")
             join_controls.columnconfigure(0, weight=1)
             self.network_worker_card = join_controls
@@ -2603,7 +2601,7 @@ def run_gui(args: argparse.Namespace) -> int:
                 show="headings",
                 selectmode="browse",
                 style="Queue.Treeview",
-                height=5,
+                height=3,
             )
             for column_name, heading, width in (
                 ("group", "Group", 155),
@@ -2614,12 +2612,14 @@ def run_gui(args: argparse.Namespace) -> int:
                 self.available_groups_tree.column(column_name, width=width, minwidth=60, stretch=column_name == "group")
             self.available_groups_tree.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 0))
             self.available_groups_tree.bind("<Double-1>", lambda _event: self.connect_selected_available_group())
-            ui.Entry(join_controls, textvariable=self.network_pairing_input_var).grid(row=2, column=0, sticky="ew", pady=(7, 0))
-            ui.Label(join_controls, text="Code only for protected groups", style="CardHint.TLabel").grid(row=3, column=0, sticky="w", pady=(3, 0))
+            ui.Label(join_controls, text="SSH invitation link", style="Field.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(7, 0))
+            ui.Entry(join_controls, textvariable=self.worker_ssh_invite_var).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            ui.Label(join_controls, text="BRW code or one-time LAN code", style="Field.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(7, 0))
+            ui.Entry(join_controls, textvariable=self.network_join_code_var).grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
             join_actions = ui.Frame(join_controls, style="Surface.TFrame")
-            join_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+            join_actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
             join_actions.columnconfigure(0, weight=1)
-            ui.Button(join_actions, text="Connect", style="Primary.TButton", command=self.connect_selected_available_group).grid(row=0, column=0, sticky="ew")
+            ui.Button(join_actions, text="Connect", style="Primary.TButton", command=self.connect_worker_quick).grid(row=0, column=0, sticky="ew")
             ui.Button(join_actions, text="Disconnect", command=self.stop_network_worker).grid(row=0, column=1, padx=(7, 0))
             self.network_role_tabs.bind("<<NotebookTabChanged>>", self.on_network_role_tab_changed)
 
@@ -2812,6 +2812,33 @@ def run_gui(args: argparse.Namespace) -> int:
             self.refresh_saved_group_selector()
             self.save_current_config()
             self.start_network_worker()
+
+        def connect_worker_quick(self) -> None:
+            """Connect from one of the two worker inputs or the selected LAN group."""
+            ssh_link = self.worker_ssh_invite_var.get().strip()
+            brw_code = self.network_join_code_var.get().strip()
+            if ssh_link:
+                try:
+                    connection = PairingCode.decode(ssh_link)
+                except ValueError as error:
+                    messagebox.showerror(self.tr("Worker connection"), str(error))
+                    return
+                if connection.transport != "ssh":
+                    messagebox.showerror(
+                        self.tr("Worker connection"),
+                        self.tr("Paste an SSH invitation in the SSH field or use the BRW field below."),
+                    )
+                    return
+                self.network_join_code_var.set(ssh_link)
+                self.start_network_worker()
+                return
+            if brw_code.startswith(("BRW2-", "BRW3-", "BRW4-")) or brw_code.casefold().startswith("brw://join/"):
+                self.start_network_worker()
+                return
+            # A short value is the one-time PIN for the selected protected LAN
+            # group. This keeps the worker page to exactly two input slots.
+            self.network_pairing_input_var.set(brw_code)
+            self.connect_selected_available_group()
 
         def switch_saved_render_group(self, _event=None) -> None:
             group = self.saved_group_labels.get(self.network_group_selector_var.get())
@@ -4611,14 +4638,17 @@ def run_gui(args: argparse.Namespace) -> int:
                     invite_key = ensure_ssh_invite_key(app_config_dir() / "ssh", group_id)
                     configure_openssh_host(invite_key.public_key, ssh_user)
                     link = PairingCode(
-                        connection.host,
-                        connection.port,
-                        connection.token,
-                        connection.transport,
-                        connection.ssh_host,
-                        connection.ssh_port,
-                        connection.ssh_user,
-                        invite_key.private_key,
+                        host=connection.host,
+                        port=connection.port,
+                        token=connection.token,
+                        transport=connection.transport,
+                        ssh_host=connection.ssh_host,
+                        ssh_port=connection.ssh_port,
+                        ssh_user=connection.ssh_user,
+                        ssh_private_key=invite_key.private_key,
+                        group_id=connection.group_id,
+                        group_name=connection.group_name,
+                        coordinator_device_id=connection.coordinator_device_id,
                     ).invitation_link
                     self.root.after(0, lambda: self._finish_ssh_invitation(invite_key.private_key, link))
                 except Exception as error:
@@ -5183,7 +5213,11 @@ def run_gui(args: argparse.Namespace) -> int:
             state = query_openssh_state()
             self._apply_openssh_state(state)
             if not state.client_installed:
-                messagebox.showerror(self.tr("Worker connection"), self.tr("Install the OpenSSH client on this PC first."))
+                if messagebox.askyesno(
+                    self.tr("OpenSSH installation"),
+                    self.tr("The SSH client is missing. Install it automatically and then press Connect again?"),
+                ):
+                    self.install_openssh()
                 return
             if connection.ssh_private_key:
                 try:
@@ -5193,6 +5227,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     return
                 self.ssh_identity_var.set(str(embedded_identity))
                 self.network_join_code_var.set(connection.without_private_key().invitation_link)
+                self.worker_ssh_invite_var.set("")
                 self.save_current_config()
             identity_text = self.ssh_identity_var.get().strip().strip('"')
             identity = Path(identity_text) if identity_text else None
