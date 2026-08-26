@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 3.0.4 — 2026-08-26
+
 ### Simpler worker connection
 
 - Added one visible Main PC action that creates and copies a complete SSH invitation with the group, endpoint, user and dedicated key.

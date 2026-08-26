@@ -1,10 +1,10 @@
-# Blender Render Watchdog 3.0.3
+# Blender Render Watchdog 3.0.4
 
-> Версия 3.0.3 делает группы устройств действительно постоянными: отдельные режимы главного ПК и worker, видимые LAN-группы, запомненные SSH-маршруты, автоматическое переподключение и непрерывные пачки кадров.
+> Версия 3.0.4 упрощает SSH-подключение до одной готовой ссылки и гарантирует непрерывный рендер всей назначенной пачки одним процессом Blender.
 
-![Blender Render Watchdog 3.0.3 — Main PC](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Main-PC.jpg)
+![Blender Render Watchdog 3.0.4 — Main PC](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.4/BlenderRenderWatchdog-3.0.4-Main-PC.jpg)
 
-![Blender Render Watchdog 3.0.3 — Worker](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.3/BlenderRenderWatchdog-3.0.3-Worker.jpg)
+![Blender Render Watchdog 3.0.4 — Worker](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/download/v3.0.4/BlenderRenderWatchdog-3.0.4-Worker.jpg)
 
 > В версии 2.3.1 главный ПК после сетевого рендера проверяет все кадры и автоматически отправляет повреждённые кадры на повторный рендер.
 
@@ -17,6 +17,15 @@
 > В версии 2.1.1 в **Settings → Interface** добавлен мгновенный выбор языка: English и Русский. Выбор сохраняется между запусками.
 
 Windows-приложение для надёжного фонового рендера Blender. Watchdog продолжает анимацию после сбоя, управляет очередью проектов, распределяет кадры между компьютерами и показывает состояние рендера на телефоне.
+
+## Что нового в 3.0.4
+
+- на Main PC появилась всегда видимая кнопка **Create ready SSH link**;
+- ссылка уже содержит группу, адрес, пользователя, порт и отдельный ключ — worker не настраивает их вручную;
+- на Worker оставлены два понятных поля: SSH invitation link и BRW/одноразовый LAN-код;
+- при отсутствии OpenSSH Client приложение предлагает установить его автоматически;
+- приватный ключ после импорта убирается из видимого поля и сохраняется отдельным защищённым файлом;
+- пачка из 10, 20 или другого количества последовательных кадров выполняется одним запуском Blender без перезапуска между кадрами.
 
 ## Что нового в 3.0.3
 
