@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
-title Blender Render Watchdog Update
-echo Checking Blender Render Watchdog updates...
-"%~dp0dist\BlenderRenderWatchdog.exe" --check-update --install-update
+title RenderW.dog Update
+echo Checking RenderW.dog updates...
+"%~dp0dist\RenderW.dog.exe" --check-update --install-update
 echo.
 pause

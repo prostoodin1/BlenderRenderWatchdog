@@ -4,7 +4,7 @@ $PackageDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Source = Join-Path $PackageDir "blender_render_watchdog.py"
 $BuildDir = Join-Path $PackageDir "build"
 $DistDir = Join-Path $PackageDir "dist"
-$ExePath = Join-Path $DistDir "BlenderRenderWatchdog.exe"
+$ExePath = Join-Path $DistDir "RenderW.dog.exe"
 
 if (-not (Test-Path -LiteralPath $Source)) {
     throw "Source file was not found: $Source"
@@ -30,7 +30,7 @@ try {
         --clean `
         --windowed `
         --onefile `
-        --name "BlenderRenderWatchdog" `
+        --name "RenderW.dog" `
         --distpath "$DistDir" `
         --workpath "$BuildDir" `
         ".\blender_render_watchdog.py"

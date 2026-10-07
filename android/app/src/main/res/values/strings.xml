@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Blender Watchdog</string>
+    <string name="app_name">RenderW.dog</string>
     <string name="eyebrow">BLENDER WATCHDOG 3.0.4</string>
     <string name="devices">Devices</string>
     <string name="history">History</string>

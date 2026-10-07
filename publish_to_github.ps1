@@ -1,10 +1,10 @@
 ﻿$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$Repo = "prostoodin1/BlenderRenderWatchdog"
+$Repo = "prostoodin1/RenderW.dog"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Source = Join-Path $Root "blender_render_watchdog.py"
-$Exe = Join-Path $Root "dist\BlenderRenderWatchdog.exe"
+$Exe = Join-Path $Root "dist\RenderW.dog.exe"
 $Manifest = Join-Path $Root "github_release\update_manifest.json"
 $ReleaseNotes = Join-Path $Root "RELEASE_NOTES.md"
 
@@ -15,7 +15,7 @@ if (-not $VersionMatch) {
 $Version = $VersionMatch.Matches[0].Groups[1].Value
 $Tag = "v$Version"
 
-Write-Host "Blender Render Watchdog GitHub Publisher" -ForegroundColor Cyan
+Write-Host "RenderW.dog GitHub Publisher" -ForegroundColor Cyan
 Write-Host "Repo: $Repo"
 Write-Host "Version: $Tag"
 
@@ -29,8 +29,8 @@ if (-not (Test-Path -LiteralPath (Split-Path -Parent $Manifest))) {
 
 $manifestJson = [ordered]@{
     version = $Version
-    exe_url = "https://github.com/$Repo/releases/latest/download/BlenderRenderWatchdog.exe"
-    notes = "Blender Render Watchdog $Tag"
+    exe_url = "https://github.com/$Repo/releases/latest/download/RenderW.dog.exe"
+    notes = "RenderW.dog $Tag"
 } | ConvertTo-Json -Depth 5
 Set-Content -LiteralPath $Manifest -Value $manifestJson -Encoding UTF8
 
@@ -65,7 +65,7 @@ Write-Host "Checking repository..." -ForegroundColor Cyan
 gh repo view $Repo 1>$null 2>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Creating repository $Repo..." -ForegroundColor Yellow
-    gh repo create $Repo --public --description "Blender Render Watchdog app" --add-readme
+    gh repo create $Repo --public --description "RenderW.dog Blender render monitoring app" --add-readme
 }
 
 Write-Host "Uploading release assets..." -ForegroundColor Cyan
@@ -81,9 +81,9 @@ if ($releaseExists) {
     gh release upload $Tag $Exe $Manifest --repo $Repo --clobber
 } else {
     if (Test-Path -LiteralPath $ReleaseNotes) {
-        gh release create $Tag $Exe $Manifest --repo $Repo --title "Blender Render Watchdog $Tag" --notes-file $ReleaseNotes --latest
+        gh release create $Tag $Exe $Manifest --repo $Repo --title "RenderW.dog $Tag" --notes-file $ReleaseNotes --latest
     } else {
-        gh release create $Tag $Exe $Manifest --repo $Repo --title "Blender Render Watchdog $Tag" --notes "Stable build with automatic update support." --latest
+        gh release create $Tag $Exe $Manifest --repo $Repo --title "RenderW.dog $Tag" --notes "Stable build with automatic update support." --latest
     }
 }
 

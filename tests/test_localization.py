@@ -53,7 +53,7 @@ class LocalizationTests(unittest.TestCase):
                 if keyword.arg == "text" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
                     visible_strings.add(keyword.value.value.strip())
 
-        language_neutral = {"", "%", "↑", "↓", "Blender", "Blender Render Watchdog", "CPU", "GPU"}
+        language_neutral = {"", "%", "↑", "↓", "Blender", "RenderW.dog", "CPU", "GPU"}
         missing = sorted(visible_strings - language_neutral - set(RUSSIAN_TRANSLATIONS))
         self.assertEqual(missing, [])
 

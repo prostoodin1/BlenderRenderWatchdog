@@ -96,10 +96,10 @@ HISTORY_PATH = app_config_dir() / "render_history.json"
 GROUPS_PATH = app_config_dir() / "render_groups.json"
 RESUME_STATE_PATH = app_config_dir() / "unfinished_render.json"
 COMPUTE_BACKENDS = ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL")
-APP_VERSION = "3.0.4"
-DEFAULT_GITHUB_REPOSITORY = "prostoodin1/BlenderRenderWatchdog"
+APP_VERSION = "3.0.5"
+DEFAULT_GITHUB_REPOSITORY = "prostoodin1/RenderW.dog"
 DEFAULT_UPDATE_MANIFEST_URL = f"https://raw.githubusercontent.com/{DEFAULT_GITHUB_REPOSITORY}/main/update_manifest.json"
-DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/BlenderRenderWatchdog.exe"
+DEFAULT_RELEASE_EXE_URL = f"https://github.com/{DEFAULT_GITHUB_REPOSITORY}/releases/latest/download/RenderW.dog.exe"
 
 
 def unique_existing_paths(paths: list[Path]) -> list[Path]:
@@ -484,7 +484,7 @@ def fetch_github_release_manifest(repository: str) -> dict[str, object]:
     import urllib.request
 
     api_url = f"https://api.github.com/repos/{repository}/releases/latest"
-    request = urllib.request.Request(api_url, headers={"User-Agent": "BlenderRenderWatchdog"})
+    request = urllib.request.Request(api_url, headers={"User-Agent": "RenderW.dog"})
     with urllib.request.urlopen(request, timeout=20) as response:
         release = json.loads(response.read().decode("utf-8"))
 
@@ -570,8 +570,8 @@ def write_update_check_cmd() -> Path:
     cmd_path.write_text(
         "@echo off\r\n"
         "chcp 65001 >nul\r\n"
-        "title Blender Render Watchdog Update\r\n"
-        "echo Checking Blender Render Watchdog updates...\r\n"
+        "title RenderW.dog Update\r\n"
+        "echo Checking RenderW.dog updates...\r\n"
         f"{launch_command}\r\n"
         "echo.\r\n"
         "pause\r\n",
@@ -720,7 +720,7 @@ def schedule_system_shutdown(seconds: int = 60) -> None:
                 "/t",
                 str(seconds),
                 "/c",
-                "Blender Render Watchdog: render finished successfully.",
+                "RenderW.dog: render finished successfully.",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -768,7 +768,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--check-update", action="store_true", help="Check GitHub for a newer app version and exit.")
     parser.add_argument("--install-update", action="store_true", help="Install update when used with --check-update.")
-    parser.add_argument("--update-source", default=None, help="Update source, default: github:prostoodin1/BlenderRenderWatchdog.")
+    parser.add_argument("--update-source", default=None, help="Update source, default: github:prostoodin1/RenderW.dog.")
     parser.add_argument("--write-update-cmd", action="store_true", help="Create Check Update.cmd next to the app and exit.")
     parser.add_argument("--worker-code", default=None, help="Run as a network worker using a BRW2 or BRW4 connection code.")
     parser.add_argument("--worker-name", default=None, help="Display name used in network worker mode.")
@@ -1418,7 +1418,7 @@ def run_gui(args: argparse.Namespace) -> int:
     class WatchdogApp:
         def __init__(self, root: tk.Tk) -> None:
             self.root = root
-            self.root.title(f"Blender Render Watchdog {APP_VERSION}")
+            self.root.title(f"RenderW.dog {APP_VERSION}")
             self.root.geometry("1280x860")
             self.root.minsize(1080, 720)
 
@@ -2045,7 +2045,7 @@ def run_gui(args: argparse.Namespace) -> int:
             top.grid(row=0, column=0, sticky="ew", pady=(0, 18))
             top.columnconfigure(0, weight=1)
 
-            ttk_module.Label(top, text="Blender Render Watchdog", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
+            ttk_module.Label(top, text="RenderW.dog", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
             ttk_module.Label(
                 top,
                 text="Smart recovery, distributed rendering, prediction and phone control.",
@@ -2273,7 +2273,7 @@ def run_gui(args: argparse.Namespace) -> int:
             header = ui.Frame(outer, style="Top.TFrame")
             header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
             header.columnconfigure(1, weight=1)
-            ui.Label(header, text="Blender Render Watchdog", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
+            ui.Label(header, text="RenderW.dog", style="Hero.TLabel").grid(row=0, column=0, sticky="w")
             project_head = ui.Frame(header, style="Top.TFrame")
             project_head.grid(row=0, column=1, sticky="w", padx=(24, 0))
             ui.Label(project_head, text="ACTIVE PROJECT", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
@@ -3475,7 +3475,7 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk_module.Label(update_card, text="GitHub Updates", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
             ttk_module.Label(
                 update_card,
-                text="No paste needed: default source is github:prostoodin1/BlenderRenderWatchdog. Advanced users can override it here.",
+                text="No paste needed: default source is github:prostoodin1/RenderW.dog. Advanced users can override it here.",
                 style="CardHint.TLabel",
             ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(2, 16))
             ttk_module.Label(update_card, text="Update source", style="Field.TLabel").grid(row=2, column=0, sticky="w", pady=6)
@@ -5809,7 +5809,7 @@ def run_gui(args: argparse.Namespace) -> int:
                                 completed=summary["completed"],
                                 failed=summary["failed"],
                             )
-                            send_notification("Blender Render Watchdog", "Distributed render finished.")
+                            send_notification("RenderW.dog", "Distributed render finished.")
                 elif worker and snapshot:
                     controller_info = snapshot.get("controller") or {}
                     controller_name = str(controller_info.get("name") or worker.connection.host) if isinstance(controller_info, dict) else worker.connection.host
@@ -6574,7 +6574,7 @@ def run_gui(args: argparse.Namespace) -> int:
                     new_devices = [gpu for gpu in gpus if gpu not in previous]
                     if new_devices:
                         self.log(f"[HOT-PLUG] New render device detected: {'; '.join(new_devices)}")
-                        send_notification("Blender Render Watchdog", f"New device detected: {new_devices[0]}")
+                        send_notification("RenderW.dog", f"New device detected: {new_devices[0]}")
                     continue
 
                 if isinstance(message, tuple) and len(message) == 4 and message[0] == "__QUEUE_ITEM__":
@@ -6603,7 +6603,7 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.set_localized(self.status_detail_var, "Queue can continue from the next frame")
                         self.set_widget_text(self.start_queue_button, "Continue queue")
                         self.start_queue_button.configure(state="normal")
-                        send_notification("Blender Render Watchdog", "Render queue paused after the current frame.")
+                        send_notification("RenderW.dog", "Render queue paused after the current frame.")
                     elif self.stop_event and self.stop_event.is_set():
                         self.clear_unfinished_resume()
                         self.set_localized(self.status_var, "Stopped")
@@ -6623,7 +6623,7 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.set_widget_text(self.start_queue_button, "Start queue")
                         self.start_queue_button.configure(state="normal")
                         send_notification(
-                            "Blender Render Watchdog",
+                            "RenderW.dog",
                             f"Render queue finished: {completed} complete, {failed} failed.",
                         )
                         if failed == 0 and self.shutdown_after_render_var.get():
@@ -6639,10 +6639,10 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.paused_queue = False
                         self.set_localized(self.status_var, "Complete")
                         self.set_localized(self.status_detail_var, "Render finished normally")
-                        send_notification("Blender Render Watchdog", "Render finished successfully.")
+                        send_notification("RenderW.dog", "Render finished successfully.")
                         if self.shutdown_after_render_var.get():
                             self.log("[WATCHDOG] Shutdown enabled. Windows will shut down in 60 seconds.")
-                            send_notification("Blender Render Watchdog", "Render finished. Shutdown starts in 60 seconds.")
+                            send_notification("RenderW.dog", "Render finished. Shutdown starts in 60 seconds.")
                             schedule_system_shutdown(60)
                     elif code == 131:
                         self.is_paused = True
@@ -6651,20 +6651,20 @@ def run_gui(args: argparse.Namespace) -> int:
                         self.set_localized(self.status_detail_var, "Ready to resume from the next frame")
                         self.set_widget_text(self.start_button, "Resume Render")
                         self.start_button.configure(state="normal")
-                        send_notification("Blender Render Watchdog", "Render paused after current frame.")
+                        send_notification("RenderW.dog", "Render paused after current frame.")
                     elif code == 130:
                         self.clear_unfinished_resume()
                         self.is_paused = False
                         self.paused_queue = False
                         self.set_localized(self.status_var, "Stopped")
                         self.set_localized(self.status_detail_var, "Render stopped by user")
-                        send_notification("Blender Render Watchdog", "Render stopped.")
+                        send_notification("RenderW.dog", "Render stopped.")
                     else:
                         self.is_paused = False
                         self.paused_queue = False
                         self.set_localized(self.status_var, "Error")
                         self.set_localized(self.status_detail_var, "Process exited with code {code}", code=code)
-                        send_notification("Blender Render Watchdog", f"Render exited with code {code}.")
+                        send_notification("RenderW.dog", f"Render exited with code {code}.")
                     continue
 
                 if isinstance(message, tuple) and len(message) == 4 and message[0] == "__UPDATE__":

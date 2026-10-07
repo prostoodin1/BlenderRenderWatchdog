@@ -1,4 +1,4 @@
-# Blender Render Watchdog 3.0.4
+# RenderW.dog 3.0.5
 
 > Версия 3.0.4 упрощает SSH-подключение до одной готовой ссылки и гарантирует непрерывный рендер всей назначенной пачки одним процессом Blender.
 
@@ -105,7 +105,7 @@ Windows-приложение для надёжного фонового ренд
 
 ## Быстрый старт
 
-Скачайте `BlenderRenderWatchdog.exe` из [последнего релиза](https://github.com/prostoodin1/BlenderRenderWatchdog/releases/latest). Дополнительная установка Python не требуется.
+Скачайте `RenderW.dog.exe` из [последнего релиза](https://github.com/prostoodin1/RenderW.dog/releases/latest). Дополнительная установка Python не требуется.
 
 1. В Workspace выберите `blender.exe`, проект и папку кадров — проект станет активным во всём приложении.
 2. При необходимости откройте Insights и нажмите **Analyze scene**.
@@ -126,7 +126,7 @@ FFmpeg должен быть доступен как `ffmpeg.exe` в `PATH`. П�
 
 ## Сетевой рендер
 
-Для локальной сети на всех render-компьютерах нужны только Blender и Blender Render Watchdog.
+Для локальной сети на всех render-компьютерах нужны только Blender и RenderW.dog.
 
 1. На главном компьютере создайте или выберите группу, включите **Visible on LAN** и нажмите **Start group**.
 2. Выберите **Open group** либо **Code required**. Во втором режиме короткий код нужен только при первом подключении.
@@ -144,7 +144,7 @@ FFmpeg должен быть доступен как `ffmpeg.exe` в `PATH`. П�
 Worker можно запустить и из командной строки:
 
 ```powershell
-BlenderRenderWatchdog.exe --worker-code BRW2-... --blender "C:\Program Files\Blender Foundation\Blender\blender.exe"
+RenderW.dog.exe --worker-code BRW2-... --blender "C:\Program Files\Blender Foundation\Blender\blender.exe"
 ```
 
 ## Мобильная панель
@@ -193,4 +193,4 @@ python -m unittest discover -s tests -v
 
 Настройки, очередь, группы устройств и история хранятся в `%LOCALAPPDATA%\BlenderRenderWatchdog`; временный cache сетевого worker очищается автоматически. SSH-ключи находятся в подпапке `ssh` с ограниченными правами доступа, а приватная часть приглашения не записывается в обычный конфиг. Сетевой controller и мобильная панель защищены случайными токенами. Короткий LAN-код действует один раз и обновляется после успешного подключения. Открытая группа безопасна только в доверенной локальной сети; облачный relay не используется. SSH-приглашение является секретом доступа — передавайте его только доверенным устройствам.
 
-Roadmap и предыдущие upgrade logs находятся в [GitHub Issues](https://github.com/prostoodin1/BlenderRenderWatchdog/issues).
+Roadmap и предыдущие upgrade logs находятся в [GitHub Issues](https://github.com/prostoodin1/RenderW.dog/issues).

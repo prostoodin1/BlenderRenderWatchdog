@@ -234,7 +234,7 @@ RUSSIAN_TRANSLATIONS = {
     "Speed checklist": "Что ускоряет рендер",
     "⚡ Strong speedup: GPU, fewer samples, denoise, adaptive sampling.\n\n⚡ Animation speedup: persistent data.\n\n⚠ Quality tradeoff: bounces, simplify, resolution percent.": "⚡ Сильное ускорение: GPU, меньше сэмплов, шумоподавление, адаптивный сэмплинг.\n\n⚡ Ускорение анимации: постоянные данные.\n\n⚠ Компромисс качества: отражения, упрощение, процент разрешения.",
     "GitHub Updates": "Обновления GitHub",
-    "No paste needed: default source is github:prostoodin1/BlenderRenderWatchdog. Advanced users can override it here.": "Ничего вставлять не нужно: источник по умолчанию — github:prostoodin1/BlenderRenderWatchdog. Опытные пользователи могут изменить его здесь.",
+    "No paste needed: default source is github:prostoodin1/RenderW.dog. Advanced users can override it here.": "Ничего вставлять не нужно: источник по умолчанию — github:prostoodin1/RenderW.dog. Опытные пользователи могут изменить его здесь.",
     "Update source": "Источник обновлений",
     "Check updates on start": "Проверять при запуске",
     "Install updates automatically": "Устанавливать автоматически",

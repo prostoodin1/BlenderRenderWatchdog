@@ -27,7 +27,7 @@ DASHBOARD_HTML = r'''<!doctype html>
 <script>
 const queryToken=new URLSearchParams(location.search).get('token')||'';if(queryToken)localStorage.setItem('watchdog-token',queryToken);const token=queryToken||localStorage.getItem('watchdog-token')||'';let lastStatus='';
 async function action(name){const r=await fetch('/api/action?token='+encodeURIComponent(token),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:name})});const d=await r.json();if(!d.ok)alert(d.error||'Command failed')}
-async function refresh(){try{const r=await fetch('/api/state?token='+encodeURIComponent(token),{cache:'no-store'});const d=await r.json();if(!d.ok)throw Error(d.error);document.querySelector('#project').textContent=d.project||'Waiting for render';document.querySelector('#detail').textContent=d.detail||'';document.querySelector('#status').textContent=(d.status||'ready').toUpperCase();const p=Number(d.progress||0);document.querySelector('#percent').textContent=Math.round(p)+'%';document.querySelector('#bar').style.width=p+'%';document.querySelector('#workers').textContent=d.workers||0;document.querySelector('#queue').textContent=d.queue||'No queued projects';if(d.preview){document.querySelector('#preview').src='/preview?token='+encodeURIComponent(token)+'&v='+Date.now()}if(lastStatus&&lastStatus!==d.status&&Notification.permission==='granted')new Notification('Blender Render Watchdog',{body:(d.project||'Render')+': '+d.status});lastStatus=d.status}catch(e){document.querySelector('#status').textContent='OFFLINE'}}
+async function refresh(){try{const r=await fetch('/api/state?token='+encodeURIComponent(token),{cache:'no-store'});const d=await r.json();if(!d.ok)throw Error(d.error);document.querySelector('#project').textContent=d.project||'Waiting for render';document.querySelector('#detail').textContent=d.detail||'';document.querySelector('#status').textContent=(d.status||'ready').toUpperCase();const p=Number(d.progress||0);document.querySelector('#percent').textContent=Math.round(p)+'%';document.querySelector('#bar').style.width=p+'%';document.querySelector('#workers').textContent=d.workers||0;document.querySelector('#queue').textContent=d.queue||'No queued projects';if(d.preview){document.querySelector('#preview').src='/preview?token='+encodeURIComponent(token)+'&v='+Date.now()}if(lastStatus&&lastStatus!==d.status&&Notification.permission==='granted')new Notification('RenderW.dog',{body:(d.project||'Render')+': '+d.status});lastStatus=d.status}catch(e){document.querySelector('#status').textContent='OFFLINE'}}
 function notifications(){Notification.requestPermission()}setInterval(refresh,2000);refresh();
 </script></body></html>'''
 
@@ -91,7 +91,7 @@ class MobileDashboardServer:
                     self._send(DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8")
                     return
                 if route == "/manifest.json":
-                    self._json({"name": "Blender Render Watchdog", "short_name": "Watchdog", "display": "standalone", "start_url": "/", "theme_color": "#070a12", "background_color": "#070a12"})
+                    self._json({"name": "RenderW.dog", "short_name": "RenderW.dog", "display": "standalone", "start_url": "/", "theme_color": "#070a12", "background_color": "#070a12"})
                     return
                 if not self._token_ok():
                     self._json({"ok": False, "error": "Unauthorized"}, 401)
